@@ -1,0 +1,26 @@
+[package]
+name = "muretto"
+description = "A launcher and content manager for Assetto Corsa."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Offscreen rendering for `src/bin/shot.rs`.
+shot = ["gpui-kit/test-support"]
+
+[dependencies]
+muretto-core.workspace = true
+gpui-kit.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[[bin]]
+name = "muretto"
+path = "src/main.rs"
+
+[[bin]]
+name = "shot"
+path = "src/bin/shot.rs"
+required-features = ["shot"]

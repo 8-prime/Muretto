@@ -1,0 +1,12 @@
+[package]
+name = "muretto-core"
+description = "Assetto Corsa install discovery, content scanning and session launching. No UI dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
+encoding_rs.workspace = true
+dirs.workspace = true
