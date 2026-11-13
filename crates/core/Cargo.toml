@@ -10,3 +10,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 encoding_rs.workspace = true
 dirs.workspace = true
+ureq = { version = "3.5.2", default-features = false, features = ["gzip", "rustls"] }
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }

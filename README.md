@@ -9,7 +9,7 @@ The interface follows `docs/design/AC Launcher — UI Design.pdf`.
 
 | Path | What it is |
 | --- | --- |
-| `crates/core` | Everything about the game that is not interface: finding the install, reading cars, tracks and weather, writing `race.ini`, starting the simulator. No UI dependencies; compiles in seconds. |
+| `crates/core` | Everything about the game that is not interface: finding the install, reading cars, tracks and weather, writing `race.ini`, starting the simulator, and installing packages such as Custom Shaders Patch. No UI dependencies; compiles in seconds. |
 | `crates/app` | The window. `theme.rs` holds colours and type, `ui/` the controls, `shell.rs` the frame, `screens/` one file per screen. |
 
 ## Running
@@ -29,6 +29,20 @@ offscreen to a PNG. Element ids after the path are clicked first:
 ```sh
 cargo run -p muretto --features shot --bin shot -- drive.png
 cargo run -p muretto --features shot --bin shot -- cars.png change-car
+```
+
+## What Muretto writes into the game folder
+
+Installing a package (so far: Custom Shaders Patch, under Settings) unpacks it
+into `.muretto/staging` inside the game folder, checks it, then moves the
+files into place. A receipt of every file is kept in `.muretto/packages`, so
+an update clears out what the old version left behind and a removal takes
+exactly what was added.
+
+To try an install against the real download without touching the game:
+
+```sh
+cargo run -p muretto-core --example csp -- /tmp/fake-game
 ```
 
 ## Fonts and icons

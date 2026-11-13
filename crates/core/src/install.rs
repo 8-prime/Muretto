@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Result, ini::Ini};
+use crate::{Error, Result};
 
 pub const STEAM_APP_ID: u32 = 244210;
 const GAME_DIR: &str = "assettocorsa";
@@ -33,11 +33,6 @@ pub enum Runtime {
         /// created yet.
         proton: Option<PathBuf>,
     },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ShadersPatch {
-    pub version: Option<String>,
 }
 
 impl Install {
@@ -124,19 +119,6 @@ impl Install {
 
     pub fn executable(&self) -> PathBuf {
         self.root.join("acs.exe")
-    }
-
-    /// Custom Shaders Patch, when its loader and data are both present.
-    pub fn shaders_patch(&self) -> Option<ShadersPatch> {
-        let extension = self.root.join("extension");
-        if !self.root.join("dwrite.dll").is_file() || !extension.is_dir() {
-            return None;
-        }
-        let version = std::fs::read(extension.join("config/data_manifest.ini"))
-            .ok()
-            .map(|bytes| Ini::parse(&crate::lenient::decode(&bytes)))
-            .and_then(|ini| ini.get("VERSION", "SHADERS_PATCH").map(str::to_owned));
-        Some(ShadersPatch { version })
     }
 }
 

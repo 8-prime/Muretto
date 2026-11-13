@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use gpui_kit::{Context, SharedString};
 use muretto_core::{
-    Car, Install, Library, SessionConfig, Skin, Track, TrackLayout, launch, session::SessionMode,
+    Car, Install, Library, SessionConfig, Skin, Track, TrackLayout, launch, packages::csp,
+    session::SessionMode,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +20,8 @@ pub struct Game {
     pub install: Install,
     pub library: Arc<Library>,
     pub launch: Launch,
+    /// Custom Shaders Patch as last seen in the game folder.
+    pub patch: Option<csp::Installed>,
     session: SessionConfig,
 }
 
@@ -27,11 +30,19 @@ impl Game {
     pub fn new(install: Install, library: Library) -> Option<Self> {
         let session = SessionConfig::first_run(&library)?;
         Some(Self {
+            patch: csp::installed(&install),
             install,
             library: Arc::new(library),
             launch: Launch::Idle,
             session,
         })
+    }
+
+    /// Looks at the game folder again, after something was installed or
+    /// removed.
+    pub fn refresh_patch(&mut self, cx: &mut Context<Self>) {
+        self.patch = csp::installed(&self.install);
+        cx.notify();
     }
 
     pub fn session(&self) -> &SessionConfig {

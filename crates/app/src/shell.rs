@@ -5,7 +5,9 @@ use gpui_kit::{
     AnyElement, Context, Div, Entity, FontWeight, IntoElement, Render, SharedString, Subscription,
     TestSupportExt as _, Window, div, prelude::*, px, rgb,
 };
-use muretto_core::{Install, Library, session::format_time};
+use std::sync::Arc;
+
+use muretto_core::{Install, Library, packages::csp, session::format_time};
 
 use crate::{
     APP_NAME,
@@ -13,6 +15,7 @@ use crate::{
     screens::{
         drive::{DriveEvent, DriveScreen},
         picker::{Picker, PickerEvent, PickerItem},
+        settings::SettingsScreen,
     },
     theme::{PAGE, color, font},
     ui::{button, display, label, launch_button, slant, tracked},
@@ -20,6 +23,7 @@ use crate::{
 
 const DRIVE: usize = 0;
 const CONTENT: usize = 1;
+const SETTINGS: usize = 4;
 
 /// Sections and the tabs within each.
 const SECTIONS: [(&str, &[&str]); 5] = [
@@ -59,6 +63,7 @@ enum Stage {
     Ready {
         game: Entity<Game>,
         drive: Entity<DriveScreen>,
+        settings: Entity<SettingsScreen>,
     },
 }
 
@@ -93,7 +98,9 @@ impl Shell {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 match found {
-                    Ok((install, library)) => this.show(install, library, window, cx),
+                    Ok((install, library)) => {
+                        this.show(install, library, Arc::new(csp::Official), window, cx)
+                    }
                     Err(error) => this.stage = Stage::Unavailable(error.to_string().into()),
                 }
                 cx.notify();
@@ -104,15 +111,17 @@ impl Shell {
         Self::loading()
     }
 
-    /// Opens directly on content that has already been read.
+    /// Opens directly on content that has already been read, taking patch
+    /// builds from `patches`.
     pub fn with_content(
         install: Install,
         library: Library,
+        patches: Arc<dyn csp::Source>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut shell = Self::loading();
-        shell.show(install, library, window, cx);
+        shell.show(install, library, patches, window, cx);
         shell
     }
 
@@ -143,6 +152,7 @@ impl Shell {
         &mut self,
         install: Install,
         library: Library,
+        patches: Arc<dyn csp::Source>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -154,6 +164,7 @@ impl Shell {
         };
         let game = cx.new(|_| game);
         let drive = cx.new(|cx| DriveScreen::new(game.clone(), window, cx));
+        let settings = cx.new(|cx| SettingsScreen::new(game.clone(), patches, cx));
         self._subscriptions = vec![
             cx.observe(&game, |_, _, cx| cx.notify()),
             cx.subscribe_in(&drive, window, |this, _, event: &DriveEvent, window, cx| {
@@ -164,7 +175,11 @@ impl Shell {
                 this.choose(choosing, window, cx);
             }),
         ];
-        self.stage = Stage::Ready { game, drive };
+        self.stage = Stage::Ready {
+            game,
+            drive,
+            settings,
+        };
     }
 
     fn choose(&mut self, choosing: Choosing, window: &mut Window, cx: &mut Context<Self>) {
@@ -237,9 +252,12 @@ impl Shell {
         let (status, healthy): (SharedString, bool) = match &self.stage {
             Stage::Loading => ("Reading content…".into(), false),
             Stage::Unavailable(_) => ("Game not found".into(), false),
-            Stage::Ready { game, .. } => match game.read(cx).install.shaders_patch() {
-                Some(_) => ("Game ready · CSP active".into(), true),
-                None => ("Game ready · CSP not installed".into(), true),
+            Stage::Ready { game, .. } => match &game.read(cx).patch {
+                Some(patch) => match &patch.version {
+                    Some(version) => (format!("Game ready · CSP {version}").into(), true),
+                    None => ("Game ready · CSP installed".into(), true),
+                },
+                None => ("Game ready · CSP not installed".into(), false),
             },
         };
 
@@ -304,10 +322,20 @@ impl Shell {
             }))
             .child(div().flex_1())
             .child(
+                // The status doubles as the way to the patch's page.
                 div()
+                    .id("status")
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Stage::Ready { settings, .. } = &this.stage {
+                            settings.update(cx, |settings, cx| settings.show_patch(cx));
+                            this.section = SETTINGS;
+                            cx.notify();
+                        }
+                    }))
                     .child(div().size(px(8.)).rounded_full().bg(rgb(if healthy {
                         color::GOOD
                     } else {
@@ -409,11 +437,15 @@ impl Shell {
                     "{reason}. Install the game through Steam, or point MURETTO_AC_ROOT at its folder and start again."
                 ),
             ),
-            Stage::Ready { drive, .. } => {
+            Stage::Ready {
+                drive, settings, ..
+            } => {
                 let (section, tabs) = SECTIONS[self.section];
                 let tab = tabs.get(self.tabs[self.section]).copied();
                 if self.section == DRIVE && self.tabs[DRIVE] == 0 {
                     drive.clone().into_any_element()
+                } else if self.section == SETTINGS {
+                    settings.clone().into_any_element()
                 } else {
                     notice(
                         tab.unwrap_or(section),

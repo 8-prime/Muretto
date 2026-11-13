@@ -78,6 +78,10 @@ pub fn command(install: &Install) -> Result<Command> {
                 .arg(&executable)
                 .env("STEAM_COMPAT_DATA_PATH", compat_data)
                 .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", steam_root);
+            if let Some(overrides) = dll_overrides(install, std::env::var("WINEDLLOVERRIDES").ok())
+            {
+                command.env("WINEDLLOVERRIDES", overrides);
+            }
             command
         }
     };
@@ -89,6 +93,19 @@ pub fn command(install: &Install) -> Result<Command> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     Ok(command)
+}
+
+/// Wine prefers its own `dwrite.dll` to one beside the executable, which is
+/// how Custom Shaders Patch loads. When the patch is installed, tell Wine to
+/// use the game's copy, keeping any overrides the player already set.
+fn dll_overrides(install: &Install, existing: Option<String>) -> Option<String> {
+    if !install.root.join("dwrite.dll").is_file() {
+        return None;
+    }
+    Some(match existing.filter(|value| !value.is_empty()) {
+        Some(existing) => format!("{existing};dwrite=n,b"),
+        None => "dwrite=n,b".to_owned(),
+    })
 }
 
 /// Writes the session and starts the game.
@@ -160,6 +177,18 @@ mod tests {
         let env: Vec<_> = command.get_envs().map(|(k, _)| k.to_owned()).collect();
         assert!(env.contains(&"STEAM_COMPAT_DATA_PATH".into()));
         assert!(env.contains(&"SteamAppId".into()));
+        assert!(
+            !env.contains(&"WINEDLLOVERRIDES".into()),
+            "no patch, no override"
+        );
+
+        // With the patch's loader in the game folder, Wine is told to use it.
+        std::fs::write(root.join("dwrite.dll"), "").unwrap();
+        assert_eq!(dll_overrides(&install, None).as_deref(), Some("dwrite=n,b"));
+        assert_eq!(
+            dll_overrides(&install, Some("dxgi=b".to_owned())).as_deref(),
+            Some("dxgi=b;dwrite=n,b")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

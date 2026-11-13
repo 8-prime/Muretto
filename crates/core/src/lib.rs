@@ -6,6 +6,7 @@ pub mod ini;
 pub mod install;
 pub mod launch;
 pub mod lenient;
+pub mod packages;
 pub mod session;
 
 pub use content::{Car, Library, Origin, Skin, Track, TrackLayout, Weather};
@@ -28,6 +29,12 @@ pub enum Error {
     InstallNotFound,
     #[error("{0}")]
     Launch(String),
+    #[error("{0}")]
+    Network(String),
+    #[error("{0}")]
+    Archive(String),
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

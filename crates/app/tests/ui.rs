@@ -1,7 +1,10 @@
 //! Drives the real window with pointer and keyboard events against a small
 //! game folder built on disk, and checks what the session becomes.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gpui_kit::{
     AnyWindowHandle, Bounds, Entity, TestAppContext, WindowBounds, WindowOptions,
@@ -13,7 +16,11 @@ use muretto::{
     game::{Game, Launch},
     shell::Shell,
 };
-use muretto_core::{Install, Library, session::SessionMode};
+use muretto_core::{
+    Error, Install, Library,
+    packages::{Progress, csp},
+    session::SessionMode,
+};
 
 /// A game folder with three cars, two tracks and one weather.
 fn game_folder(name: &str) -> PathBuf {
@@ -65,7 +72,55 @@ fn game_folder(name: &str) -> PathBuf {
     root
 }
 
+/// Stands in for the patch's download site: lists two builds and hands out
+/// a small archive for either, or fails like a dropped connection.
+struct Shelf {
+    online: bool,
+}
+
+impl csp::Source for Shelf {
+    fn catalogue(&self) -> muretto_core::Result<csp::Catalogue> {
+        if !self.online {
+            return Err(Error::Network("No connection.".to_owned()));
+        }
+        Ok(csp::Catalogue::parse(
+            r#"<li><a href="?info=0.2.11">v0.2.11</a> (119.12 MB, <span class="tag tag-recommended">recommended</span>)</li>
+               <li><a href="?info=0.3.1">v0.3.1</a> (140.76 MB, <span class="tag tag-untested">untested</span>)</li>"#,
+        ))
+    }
+
+    fn fetch(&self, release: &csp::Release, to: &Path, _: &Progress) -> muretto_core::Result<()> {
+        if !self.online {
+            return Err(Error::Network("Download failed: no connection.".to_owned()));
+        }
+        use std::io::Write as _;
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(to).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("dwrite.dll", options).unwrap();
+        zip.write_all(b"loader").unwrap();
+        zip.start_file("extension/config/data_manifest.ini", options)
+            .unwrap();
+        write!(
+            zip,
+            "[VERSION]\nSHADERS_PATCH={}\nSHADERS_PATCH_BUILD=1\n",
+            release.version
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        Ok(())
+    }
+}
+
 fn open(cx: &mut TestAppContext, root: &Path) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
+    open_with(cx, root, Shelf { online: true })
+}
+
+fn open_with(
+    cx: &mut TestAppContext,
+    root: &Path,
+    patches: Shelf,
+) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
     let install = Install::at(root.to_path_buf(), None);
     let library = Library::scan(&install);
     assert_eq!((library.cars.len(), library.tracks.len()), (3, 2));
@@ -80,7 +135,9 @@ fn open(cx: &mut TestAppContext, root: &Path) -> (AnyWindowHandle, Entity<Game>,
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Shell::with_content(install, library, window, cx)),
+            |window, cx| {
+                cx.new(|cx| Shell::with_content(install, library, Arc::new(patches), window, cx))
+            },
         )
         .unwrap();
         let game = shell
@@ -238,4 +295,66 @@ fn dragging_a_slider_to_its_end_sets_the_limit(cx: &mut TestAppContext) {
         );
     });
     cx.update(|cx| assert_eq!(game.read(cx).session().ai_strength, 70));
+}
+
+const SETTINGS: (&str, usize) = ("section", 4);
+
+#[gpui_kit::test]
+fn the_patch_is_installed_updated_and_removed_from_settings(cx: &mut TestAppContext) {
+    let root = game_folder("patch");
+    let (window, game, _) = open(cx, &root);
+    cx.update(|cx| assert_eq!(game.read(cx).patch, None));
+
+    // The main button offers the recommended build, not the newest.
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click("patch-install", cx));
+    cx.update(|cx| {
+        let patch = game.read(cx).patch.clone().expect("the patch is installed");
+        assert_eq!(patch.version.as_deref(), Some("0.2.11"));
+        assert!(patch.managed);
+    });
+    assert_eq!(std::fs::read(root.join("dwrite.dll")).unwrap(), b"loader");
+    // Up to date now, so the offer is gone.
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("patch-install").is_none());
+    })
+    .unwrap();
+
+    // Any listed build can be installed over it; the newest is first.
+    act(cx, window, |window, cx| {
+        window.click(("patch-version", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            game.read(cx).patch.as_ref().unwrap().version.as_deref(),
+            Some("0.3.1")
+        );
+    });
+
+    // Removal asks first.
+    act(cx, window, |window, cx| window.click("patch-remove", cx));
+    assert!(root.join("dwrite.dll").exists());
+    act(cx, window, |window, cx| {
+        window.click("patch-remove-confirm", cx)
+    });
+    cx.update(|cx| assert_eq!(game.read(cx).patch, None));
+    assert!(!root.join("dwrite.dll").exists() && !root.join("extension").exists());
+}
+
+#[gpui_kit::test]
+fn without_a_connection_the_known_builds_are_offered_and_failure_is_shown(cx: &mut TestAppContext) {
+    let root = game_folder("offline");
+    let (window, game, _) = open_with(cx, &root, Shelf { online: false });
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click("patch-install", cx));
+    cx.update(|cx| assert_eq!(game.read(cx).patch, None));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // The failure stays on screen until dismissed, and nothing was written.
+        assert!(window.try_find("patch-dismiss").is_some());
+    })
+    .unwrap();
+    assert!(!root.join("dwrite.dll").exists());
+    assert!(!root.join(".muretto/downloads").exists());
 }

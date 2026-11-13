@@ -8,7 +8,10 @@ fn main() {
         Err(e) => return eprintln!("{e}"),
     };
     println!("{install:#?}");
-    println!("shaders patch: {:?}", install.shaders_patch());
+    println!(
+        "shaders patch: {:?}",
+        muretto_core::packages::csp::installed(&install)
+    );
 
     let started = std::time::Instant::now();
     let library = Library::scan(&install);

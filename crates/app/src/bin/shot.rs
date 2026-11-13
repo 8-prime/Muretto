@@ -4,16 +4,17 @@
 //! `cargo run -p muretto --features shot --bin shot -- out.png [element-id …]`
 //!
 //! Element ids after the path are clicked in order before the picture is
-//! taken, e.g. `change-car` to capture the car list.
+//! taken, e.g. `change-car` to capture the car list or `section:4` for the
+//! fifth section.
 
 use std::{sync::Arc, time::Duration};
 
 use gpui_kit::{
-    Bounds, HeadlessAppContext, SharedString, WindowBounds, WindowOptions, prelude::*, px, size,
-    test::TestWindowExt as _,
+    Bounds, ElementId, HeadlessAppContext, SharedString, WindowBounds, WindowOptions, prelude::*,
+    px, size, test::TestWindowExt as _,
 };
 use muretto::{assets::Assets, shell::Shell};
-use muretto_core::{Install, Library};
+use muretto_core::{Install, Library, packages::csp};
 
 fn main() {
     let out = std::env::args()
@@ -41,7 +42,11 @@ fn main() {
                     ..Default::default()
                 },
                 cx,
-                |window, cx| cx.new(|cx| Shell::with_content(install, library, window, cx)),
+                |window, cx| {
+                    cx.new(|cx| {
+                        Shell::with_content(install, library, Arc::new(csp::Official), window, cx)
+                    })
+                },
             )
         })
         .expect("the window opens");
@@ -58,10 +63,16 @@ fn main() {
     };
     settle(&mut cx);
     for id in std::env::args().skip(2) {
-        cx.update_window(window, |_, window, cx| {
-            window.click(SharedString::from(id), cx)
-        })
-        .expect("the element is clicked");
+        // "section:4" names the fifth of a numbered family of elements.
+        let numbered = id
+            .split_once(':')
+            .and_then(|(name, n)| Some((name.to_owned(), n.parse().ok()?)));
+        let id = match numbered {
+            Some((name, index)) => ElementId::NamedInteger(SharedString::from(name), index),
+            None => ElementId::Name(SharedString::from(id)),
+        };
+        cx.update_window(window, |_, window, cx| window.click(id, cx))
+            .expect("the element is clicked");
         settle(&mut cx);
     }
 
