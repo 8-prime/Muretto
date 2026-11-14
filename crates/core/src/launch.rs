@@ -29,7 +29,7 @@ pub fn write_session(install: &Install, library: &Library, config: &SessionConfi
 /// The stock launcher copies the default settings into the user's folder on
 /// first start. The simulator will not run without them, so do the same for
 /// any that are missing; existing files are never touched.
-fn seed_defaults(defaults: &Path, cfg: &Path) -> Result<()> {
+pub(crate) fn seed_defaults(defaults: &Path, cfg: &Path) -> Result<()> {
     std::fs::create_dir_all(cfg).map_err(io_err(cfg))?;
     let Ok(entries) = std::fs::read_dir(defaults) else {
         return Ok(());
@@ -44,7 +44,7 @@ fn seed_defaults(defaults: &Path, cfg: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write(path: &Path, contents: &str) -> Result<()> {
     // The game expects Windows line endings in files it later rewrites.
     std::fs::write(path, contents.replace('\n', "\r\n")).map_err(io_err(path))
 }

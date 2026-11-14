@@ -99,6 +99,14 @@ impl<T: Clone + PartialEq + 'static> ChoiceField<T> {
     pub fn element(&self) -> impl IntoElement + use<T> {
         Select::new(&self.state).h(px(36.)).bg(rgb(color::BG))
     }
+
+    /// The drop-down, showing `placeholder` while nothing is chosen.
+    pub fn element_or(&self, placeholder: &'static str) -> impl IntoElement + use<T> {
+        Select::new(&self.state)
+            .placeholder(placeholder)
+            .h(px(36.))
+            .bg(rgb(color::BG))
+    }
 }
 
 /// A slider over a numeric range.
@@ -129,6 +137,18 @@ impl RangeField {
         Self {
             state,
             _subscription,
+        }
+    }
+
+    /// Moves the handle to `value`, unless it is already within half a step
+    /// of it, so a drag in progress is left alone.
+    pub fn set(&self, value: f32, window: &mut Window, cx: &mut App) {
+        let state = self.state.read(cx);
+        let (current, step) = (state.value().end(), state.step_value());
+        let value = value.clamp(state.min_value(), state.max_value());
+        if (current - value).abs() > step / 2. {
+            self.state
+                .update(cx, |state, cx| state.set_value(value, window, cx));
         }
     }
 

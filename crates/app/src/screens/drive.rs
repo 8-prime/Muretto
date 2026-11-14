@@ -38,7 +38,8 @@ pub struct DriveScreen {
     grid: ChoiceField<GridKind>,
     weather: ChoiceField<String>,
     surface: ChoiceField<TrackSurface>,
-    assists: ChoiceField<AssistPreset>,
+    /// `None` stands for assists set one by one in Settings.
+    assists: ChoiceField<Option<AssistPreset>>,
     ai_strength: RangeField,
     ai_aggression: RangeField,
     time: RangeField,
@@ -117,12 +118,17 @@ impl DriveScreen {
             assists: ChoiceField::new(
                 AssistPreset::ALL
                     .into_iter()
-                    .map(|p| (p, SharedString::from(p.label())))
+                    .map(|p| (Some(p), SharedString::from(p.label())))
+                    .chain([(None, "Custom".into())])
                     .collect(),
-                &session.assists.preset().unwrap_or(AssistPreset::Pro),
+                &session.assists.preset(),
                 window,
                 cx,
-                |this, preset, _, cx| this.edit(cx, |s| s.assists = preset.assists()),
+                |this, preset, _, cx| {
+                    if let Some(preset) = preset {
+                        this.set_assists(cx, preset);
+                    }
+                },
             ),
             ai_strength: RangeField::new(
                 (70., 100., 1.),
@@ -181,6 +187,16 @@ impl DriveScreen {
         self.laps.set(session.laps, window, cx);
         self.opponents.set(session.opponents, window, cx);
         self.start_position.set(session.start_position, window, cx);
+        self.assists.select(&session.assists.preset(), window, cx);
+    }
+
+    fn set_assists(&self, cx: &mut App, preset: AssistPreset) {
+        self.game.update(cx, |game, cx| {
+            // The session has them either way; a failure to keep them for
+            // next time shows on the Settings screen.
+            let result = game.set_assists(cx, |assists| *assists = preset.assists());
+            game.config_error = result.err().map(|e| e.to_string().into());
+        });
     }
 
     fn edit(&self, cx: &mut App, change: impl FnOnce(&mut SessionConfig)) {

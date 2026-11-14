@@ -10,8 +10,10 @@ pub struct Ini {
 }
 
 impl Ini {
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            sections: Vec::new(),
+        }
     }
 
     pub fn parse(text: &str) -> Self {

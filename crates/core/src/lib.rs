@@ -10,6 +10,7 @@ pub mod lenient;
 pub mod online;
 pub mod packages;
 pub mod session;
+pub mod settings;
 pub mod steam;
 
 pub use content::{Car, Library, Origin, Skin, Track, TrackLayout, Weather};

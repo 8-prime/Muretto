@@ -464,6 +464,7 @@ fn dragging_a_slider_to_its_end_sets_the_limit(cx: &mut TestAppContext) {
 }
 
 const SETTINGS: (&str, usize) = ("section", 4);
+const PATCH_PAGE: (&str, usize) = ("Custom Shaders Patch", 0);
 
 #[gpui_kit::test]
 fn the_patch_is_installed_updated_and_removed_from_settings(cx: &mut TestAppContext) {
@@ -473,6 +474,7 @@ fn the_patch_is_installed_updated_and_removed_from_settings(cx: &mut TestAppCont
 
     // The main button offers the recommended build, not the newest.
     act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(PATCH_PAGE, cx));
     act(cx, window, |window, cx| window.click("patch-install", cx));
     cx.update(|cx| {
         let patch = game.read(cx).patch.clone().expect("the patch is installed");
@@ -513,6 +515,7 @@ fn without_a_connection_the_known_builds_are_offered_and_failure_is_shown(cx: &m
     let root = game_folder("offline");
     let (window, game, _) = open_with(cx, &root, Shelf { online: false }, Paddock::default());
     act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(PATCH_PAGE, cx));
     act(cx, window, |window, cx| window.click("patch-install", cx));
     cx.update(|cx| assert_eq!(game.read(cx).patch, None));
     cx.update_window(window, |_, window, cx| {
@@ -916,4 +919,133 @@ fn servers_are_sorted_starred_found_on_the_network_and_completed(cx: &mut TestAp
         assert!(online.dialog().is_none());
         assert!(online.selected().unwrap().track_installed);
     });
+}
+
+const CONTROLS_PAGE: (&str, usize) = ("Assetto Corsa", 2);
+const ASSISTS_PAGE: (&str, usize) = ("Assetto Corsa", 3);
+
+fn cfg_file(root: &Path, name: &str) -> String {
+    let path = Install::at(root.to_path_buf(), None).cfg_dir().join(name);
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+#[gpui_kit::test]
+fn a_video_setting_is_written_at_once_and_restored(cx: &mut TestAppContext) {
+    let root = game_folder("video-settings");
+    std::fs::write(root.join("cfg/audio.ini"), "[LEVELS]\r\nMASTER=1\r\n").unwrap();
+    let (window, _, _) = open(cx, &root);
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    // Video is the first page.
+    act(cx, window, |window, cx| {
+        window.click("setting-vertical-sync", cx)
+    });
+    assert_eq!(cfg_file(&root, "video.ini"), "[VIDEO]\r\nVSYNC=1\r\n");
+    // The game's other defaults come along so it still starts.
+    assert!(cfg_file(&root, "audio.ini").contains("MASTER=1"));
+
+    act(cx, window, |window, cx| window.click("restore-page", cx));
+    assert!(
+        cfg_file(&root, "video.ini").contains("VSYNC=1"),
+        "restoring asks first"
+    );
+    act(cx, window, |window, cx| {
+        window.click("restore-page-confirm", cx)
+    });
+    assert_eq!(cfg_file(&root, "video.ini"), "[VIDEO]\r\n");
+}
+
+#[gpui_kit::test]
+fn assists_set_in_settings_reach_the_session_and_carry_over(cx: &mut TestAppContext) {
+    use muretto_core::session::AssistPreset;
+    let root = game_folder("assists-settings");
+    let (window, game, _) = open(cx, &root);
+    cx.update(|cx| {
+        assert_eq!(
+            game.read(cx).session().assists.preset(),
+            Some(AssistPreset::Pro)
+        )
+    });
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(ASSISTS_PAGE, cx));
+    act(cx, window, |window, cx| {
+        window.click("setting-ideal-line", cx)
+    });
+    cx.update(|cx| {
+        let assists = &game.read(cx).session().assists;
+        assert!(assists.ideal_line);
+        assert_eq!(assists.preset(), None);
+    });
+    assert!(cfg_file(&root, "assists.ini").contains("IDEAL_LINE=1"));
+
+    act(cx, window, |window, cx| {
+        window.click(("assist-preset", AssistPreset::Racer as usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            game.read(cx).session().assists.preset(),
+            Some(AssistPreset::Racer)
+        )
+    });
+
+    // The next start picks up where this one left off.
+    let (_, again, _) = open(cx, &root);
+    cx.update(|cx| {
+        assert_eq!(
+            again.read(cx).session().assists.preset(),
+            Some(AssistPreset::Racer)
+        )
+    });
+}
+
+#[gpui_kit::test]
+fn controls_are_inverted_switched_and_saved_as_a_preset(cx: &mut TestAppContext) {
+    let root = game_folder("controls-settings");
+    std::fs::write(
+        root.join("cfg/controls.ini"),
+        "[HEADER]\nINPUT_METHOD=WHEEL\n[CONTROLLERS]\nCON0=Wheel Base\n\
+         [STEER]\nJOY=0\nAXLE=0\nSCALE=1\n[THROTTLE]\nJOY=0\nAXLE=2\nMIN=-1\nMAX=1\n",
+    )
+    .unwrap();
+    let (window, _, _) = open(cx, &root);
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(CONTROLS_PAGE, cx));
+
+    // Throttle is the second axis.
+    act(cx, window, |window, cx| {
+        window.click(("axis-invert", 1usize), cx)
+    });
+    let written = cfg_file(&root, "controls.ini");
+    assert!(
+        written.contains("[THROTTLE]\r\nJOY=0\r\nAXLE=2\r\nMIN=1\r\nMAX=-1"),
+        "{written}"
+    );
+
+    act(cx, window, |window, cx| window.click("preset-save-as", cx));
+    act(cx, window, |window, cx| window.input("Mine", cx));
+    act(cx, window, |window, cx| window.click("preset-save", cx));
+    let preset = Install::at(root.clone(), None)
+        .cfg_dir()
+        .join("controllers/savedsetups/Mine.ini");
+    assert!(std::fs::read_to_string(preset).unwrap().contains("MIN=1"));
+
+    act(cx, window, |window, cx| window.click("input-gamepad", cx));
+    assert!(cfg_file(&root, "controls.ini").contains("INPUT_METHOD=X360"));
+}
+
+#[gpui_kit::test]
+fn searching_settings_opens_the_page_that_has_it(cx: &mut TestAppContext) {
+    let root = game_folder("settings-search");
+    let (window, _, _) = open(cx, &root);
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click("settings-search", cx));
+    act(cx, window, |window, cx| window.input("kerb", cx));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("page-controls").is_some());
+        assert!(
+            window.try_find(("Assetto Corsa", 0usize)).is_none(),
+            "Video has no kerbs"
+        );
+    })
+    .unwrap();
 }

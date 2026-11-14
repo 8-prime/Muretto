@@ -148,11 +148,21 @@ impl Aid {
         }
     }
 
+    pub const ALL: [Aid; 3] = [Aid::Off, Aid::Factory, Aid::On];
+
     fn value(self) -> u32 {
         match self {
             Aid::Off => 0,
             Aid::Factory => 1,
             Aid::On => 2,
+        }
+    }
+
+    fn of(value: f64) -> Self {
+        match value as u32 {
+            0 => Aid::Off,
+            1 => Aid::Factory,
+            _ => Aid::On,
         }
     }
 }
@@ -243,6 +253,27 @@ impl Assists {
         AssistPreset::ALL
             .into_iter()
             .find(|preset| preset.assists() == *self)
+    }
+
+    /// Reads `assists.ini`, taking `fallback`'s value for anything missing.
+    pub fn from_ini(ini: &Ini, fallback: &Assists) -> Assists {
+        let s = "ASSISTS";
+        let number = |key| ini.get_number(s, key);
+        let flag = |key, fallback| number(key).map_or(fallback, |n| n != 0.);
+        let whole = |key, fallback| number(key).map_or(fallback, |n: f64| n.max(0.).round() as u32);
+        Assists {
+            abs: number("ABS").map_or(fallback.abs, Aid::of),
+            traction_control: number("TRACTION_CONTROL").map_or(fallback.traction_control, Aid::of),
+            stability: whole("STABILITY_CONTROL", fallback.stability).min(100),
+            damage: whole("DAMAGE", fallback.damage).min(100),
+            tyre_wear: whole("TYRE_WEAR", fallback.tyre_wear),
+            fuel_use: whole("FUEL_RATE", fallback.fuel_use),
+            ideal_line: flag("IDEAL_LINE", fallback.ideal_line),
+            auto_clutch: flag("AUTO_CLUTCH", fallback.auto_clutch),
+            auto_shifter: flag("AUTO_SHIFTER", fallback.auto_shifter),
+            auto_blip: flag("AUTO_BLIP", fallback.auto_blip),
+            tyre_blankets: flag("TYRE_BLANKETS", fallback.tyre_blankets),
+        }
     }
 
     pub fn to_ini(&self) -> Ini {
@@ -764,6 +795,21 @@ mod tests {
         assert_eq!(sun_angle(23 * 3600), 80);
         assert_eq!(compass(45), "north-east");
         assert_eq!(compass(350), "north");
+    }
+
+    #[test]
+    fn assists_read_back_from_their_file() {
+        let racer = AssistPreset::Racer.assists();
+        assert_eq!(
+            Assists::from_ini(&racer.to_ini(), &AssistPreset::Pro.assists()),
+            racer
+        );
+        let partial = Ini::parse("[ASSISTS]\nABS=0\nIDEAL_LINE=1\n");
+        let read = Assists::from_ini(&partial, &AssistPreset::Pro.assists());
+        assert_eq!(
+            (read.abs, read.ideal_line, read.damage),
+            (Aid::Off, true, 100)
+        );
     }
 
     #[test]

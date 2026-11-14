@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use gpui_kit::{Context, SharedString};
 use muretto_core::{
-    Car, Install, Library, SessionConfig, Skin, Track, TrackLayout, launch, packages::csp,
-    session::SessionMode,
+    Car, Install, Library, SessionConfig, Skin, Track, TrackLayout, launch,
+    packages::csp,
+    session::{Assists, SessionMode},
+    settings::{self, Config},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,14 +29,25 @@ pub struct Game {
     /// Goes up whenever the mods in the game folder may have changed, so
     /// views that read them from disk know when to look again.
     pub installed_revision: u64,
+    /// The game's own settings files.
+    pub config: Config,
+    /// Why the last change to them could not be written.
+    pub config_error: Option<SharedString>,
     session: SessionConfig,
 }
 
 impl Game {
     /// `None` when the install has no car or track that can be driven.
     pub fn new(install: Install, library: Library) -> Option<Self> {
-        let session = SessionConfig::first_run(&library)?;
+        let mut session = SessionConfig::first_run(&library)?;
+        let config = Config::load(&install);
+        // Assists set in the game's files last time carry over.
+        if config.has_own(settings::ASSISTS) {
+            session.assists = Assists::from_ini(config.file(settings::ASSISTS), &session.assists);
+        }
         Some(Self {
+            config,
+            config_error: None,
             patch: csp::installed(&install),
             proton_fix: csp::proton_fix(&install),
             installed_revision: 0,
@@ -60,6 +73,29 @@ impl Game {
         self.library = Arc::new(library);
         self.installed_revision += 1;
         cx.notify();
+    }
+
+    /// Changes the game's settings files. The change is written at once.
+    pub fn configure(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Config, &Install) -> muretto_core::Result<()>,
+    ) -> muretto_core::Result<()> {
+        let result = change(&mut self.config, &self.install);
+        cx.notify();
+        result
+    }
+
+    /// Changes the assists, and keeps them for next time in the game's
+    /// `assists.ini`.
+    pub fn set_assists(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Assists),
+    ) -> muretto_core::Result<()> {
+        self.edit(cx, |session| change(&mut session.assists));
+        let ini = self.session.assists.to_ini();
+        self.config.replace(settings::ASSISTS, ini)
     }
 
     pub fn session(&self) -> &SessionConfig {

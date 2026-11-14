@@ -239,7 +239,7 @@ impl Shell {
         };
         let game = cx.new(|_| game);
         let drive = cx.new(|cx| DriveScreen::new(game.clone(), window, cx));
-        let settings = cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, cx));
+        let settings = cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, window, cx));
         let saved = Saved::load(sources.saved_servers);
         let online =
             cx.new(|cx| OnlineScreen::new(game.clone(), sources.servers, saved, window, cx));
