@@ -35,7 +35,7 @@ fn main() {
         filter.toggle(Facet::Track, &track);
     }
     let started = Instant::now();
-    let matching = listing.matching(&filter);
+    let matching = listing.matching(&filter, Default::default(), &[]);
     let facets: Vec<_> = Facet::ALL
         .iter()
         .map(|&facet| (facet, listing.facet(facet, &filter)))
@@ -83,4 +83,21 @@ fn main() {
             Err(error) => println!("first server: {error}"),
         }
     }
+
+    let targets: Vec<_> = listing
+        .servers
+        .iter()
+        .filter_map(|listed| listed.server.ping_address())
+        .collect();
+    let started = Instant::now();
+    let mut answers = Vec::new();
+    Official.ping(&targets, &mut |_, took| answers.push(took));
+    answers.sort();
+    println!(
+        "pinged {} servers in {:?}: {} answered, median {:?}",
+        targets.len(),
+        started.elapsed(),
+        answers.len(),
+        answers.get(answers.len() / 2)
+    );
 }

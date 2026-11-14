@@ -1,9 +1,15 @@
-//! Online › All servers: the lobby's servers, narrowed down by searching,
-//! by switches, and by ticking tracks, cars, countries and sessions from
-//! lists of what servers actually run. The chosen server's details and the
-//! way in sit on the right.
+//! Online: the lobby's servers, the player's favourites and recent ones,
+//! and those on the local network, narrowed down by searching, by switches,
+//! and by ticking tracks, cars, countries and sessions from lists of what
+//! servers actually run. The chosen server's details, the content it needs
+//! and the way in sit on the right.
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    net::SocketAddr,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 
 use gpui_kit::{
     AnyElement, App, Context, Div, Entity, FontWeight, IntoElement, Render, SharedString, Stateful,
@@ -14,17 +20,64 @@ use gpui_kit::{
     px, relative, rgb, svg, uniform_list,
 };
 use muretto_core::{
-    launch,
-    online::{self, Facet, Filter, Join, Listed, Listing, Server, SessionKind, Slot},
+    Error, Library, launch,
+    online::{
+        self, Column, Facet, Filter, Found, Join, Listed, Listing, Order, Scope, Server,
+        SessionKind, Slot, looks_like_traffic,
+        offers::{Kind, Offer},
+        saved::Saved,
+    },
+    packages::content::{Added, install_offer},
     steam::SteamUser,
 };
 
 use crate::{
     game::{Game, Launch},
-    screens::facet_picker::{FacetEvent, FacetPicker},
+    job::Job,
+    screens::{
+        facet_picker::{FacetEvent, FacetPicker},
+        get_content::{ContentDialog, ContentEvent, added_text},
+    },
     theme::{PAGE, RADIUS, color, font},
     ui::{badge, button, label, launch_button, mono, muted},
 };
+
+/// The tabs of the Online section, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    All,
+    Favourites,
+    Recent,
+    Lan,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::All, Tab::Favourites, Tab::Recent, Tab::Lan];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::All => "All servers",
+            Tab::Favourites => "Favourites",
+            Tab::Recent => "Recent",
+            Tab::Lan => "LAN",
+        }
+    }
+}
+
+enum Lan {
+    Idle,
+    Searching,
+    Searched,
+}
+
+enum Offers {
+    Loading,
+    Loaded(Vec<Offer>),
+    Failed(SharedString),
+}
+
+/// A ping at or above this many milliseconds is shown as a warning.
+const SLOW_PING: u32 = 90;
 
 enum Load {
     /// Not asked for yet: the lobby is read when the screen is first shown.
@@ -55,10 +108,26 @@ pub struct OnlineScreen {
     source: Arc<dyn online::Source>,
     load: Load,
     player: Option<SteamUser>,
+    saved: Saved,
+    tab: Tab,
+    /// The lobby's servers, and kept ones asked directly.
+    servers: Arc<Vec<Server>>,
+    /// Servers that answered on this network.
+    lan_servers: Vec<Server>,
+    lan: Lan,
+    /// Names of kept servers that neither the lobby lists nor answered.
+    unanswered: Vec<(String, String)>,
     listing: Arc<Listing>,
+    /// The content the listing was worked out against.
+    listed_library: Arc<Library>,
     /// Why the list on show is an older copy, if it is.
     stale: Option<SharedString>,
     filter: Filter,
+    order: Order,
+    /// Milliseconds, by where the server answers pings.
+    pings: HashMap<SocketAddr, u32>,
+    /// The same, by index into the listing.
+    ping_by_index: Vec<Option<u32>>,
     /// Indices into the listing that pass the filter, in order.
     matching: Vec<usize>,
     /// Index into the listing of the server shown on the right.
@@ -66,20 +135,35 @@ pub struct OnlineScreen {
     /// The selected server's slots, as it last reported them.
     slots: Option<Slots>,
     car: Option<String>,
+    /// Where the selected server says its content can be downloaded.
+    offers: Option<Offers>,
+    /// Content being downloaded for the selected server.
+    fetching: Option<Job>,
+    /// What the last download added, or why it failed.
+    fetched: Option<(SharedString, bool)>,
+    show_traffic: bool,
     launch: Launch,
     search: Entity<InputState>,
     password: Entity<InputState>,
     picker: Option<(Entity<FacetPicker>, Subscription)>,
+    dialog: Option<(Entity<ContentDialog>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
 const DETAIL_WIDTH: f32 = 440.;
 const ROW: f32 = 54.;
+const STAR_W: f32 = 16.;
+const TRACK_W: f32 = 170.;
+const CARS_W: f32 = 150.;
+const SESSION_W: f32 = 104.;
+const DRIVERS_W: f32 = 64.;
+const PING_W: f32 = 56.;
 
 impl OnlineScreen {
     pub fn new(
         game: Entity<Game>,
         source: Arc<dyn online::Source>,
+        saved: Saved,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -91,38 +175,118 @@ impl OnlineScreen {
                 .placeholder("Server password")
                 .masked(true)
         });
-        let _subscriptions = vec![cx.subscribe(&search, |this, search, event, cx| {
-            if let InputEvent::Change = event {
-                this.filter.text = search.read(cx).value().to_string();
-                this.refilter();
-                cx.notify();
-            }
-        })];
+        let _subscriptions = vec![
+            cx.subscribe(&search, |this, search, event, cx| {
+                if let InputEvent::Change = event {
+                    this.filter.text = search.read(cx).value().to_string();
+                    this.refilter();
+                    cx.notify();
+                }
+            }),
+            // Content added elsewhere changes what is installed and missing.
+            cx.observe(&game, |this, game, cx| {
+                if !Arc::ptr_eq(&this.listed_library, &game.read(cx).library) {
+                    this.relist(cx);
+                }
+            }),
+        ];
+        let listed_library = game.read(cx).library.clone();
         Self {
             game,
             source,
             load: Load::Idle,
             player: None,
+            saved,
+            tab: Tab::All,
+            servers: Arc::default(),
+            lan_servers: Vec::new(),
+            lan: Lan::Idle,
+            unanswered: Vec::new(),
             listing: Arc::default(),
+            listed_library,
             stale: None,
             filter: Filter::default(),
+            order: Order::default(),
+            pings: HashMap::new(),
+            ping_by_index: Vec::new(),
             matching: Vec::new(),
             selected: None,
             slots: None,
             car: None,
+            offers: None,
+            fetching: None,
+            fetched: None,
+            show_traffic: false,
             launch: Launch::Idle,
             search,
             password,
             picker: None,
+            dialog: None,
             _subscriptions,
         }
     }
 
-    /// Called whenever the screen is shown; reads the lobby the first time.
+    /// Called whenever the screen is shown; reads the lobby the first time,
+    /// and searches the network the first time LAN is open.
     pub fn visit(&mut self, cx: &mut Context<Self>) {
         if matches!(self.load, Load::Idle) {
-            self.refresh(cx);
+            self.read_lobby(cx);
         }
+        if self.tab == Tab::Lan && matches!(self.lan, Lan::Idle) {
+            self.search_lan(cx);
+        }
+    }
+
+    pub fn tab(&self) -> Tab {
+        self.tab
+    }
+
+    pub fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.filter.scope = self.scope();
+        self.refilter();
+        self.visit(cx);
+        cx.notify();
+    }
+
+    fn scope(&self) -> Scope {
+        let addresses = |kept: &[online::saved::Kept]| {
+            Scope::Kept(kept.iter().map(|k| k.address.clone()).collect())
+        };
+        match self.tab {
+            Tab::All => Scope::Lobby,
+            Tab::Favourites => addresses(&self.saved.favourites),
+            Tab::Recent => addresses(&self.saved.recent),
+            Tab::Lan => Scope::Lan,
+        }
+    }
+
+    /// How many servers a tab holds, before any filter.
+    pub fn count(&self, tab: Tab) -> Option<usize> {
+        match tab {
+            Tab::All => (!self.servers.is_empty()).then(|| {
+                self.servers
+                    .iter()
+                    .filter(|server| server.found == Found::Lobby)
+                    .count()
+            }),
+            Tab::Favourites => Some(self.saved.favourites.len()),
+            Tab::Recent => Some(self.saved.recent.len()),
+            Tab::Lan => matches!(self.lan, Lan::Searched).then_some(self.lan_servers.len()),
+        }
+    }
+
+    pub fn saved(&self) -> &Saved {
+        &self.saved
+    }
+
+    pub fn order(&self) -> Order {
+        self.order
+    }
+
+    /// The selected server's ping in milliseconds, once it has answered.
+    pub fn ping(&self, index: usize) -> Option<u32> {
+        self.ping_by_index.get(index).copied().flatten()
     }
 
     pub fn is_loading(&self) -> bool {
@@ -154,44 +318,81 @@ impl OnlineScreen {
         self.picker.as_ref().map(|(picker, _)| picker)
     }
 
-    /// Reads the lobby again.
+    /// Reads the lobby again, or searches the network again on LAN.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.tab == Tab::Lan {
+            self.search_lan(cx);
+        } else {
+            self.read_lobby(cx);
+        }
+    }
+
+    pub fn is_searching_lan(&self) -> bool {
+        matches!(self.lan, Lan::Searching)
+    }
+
+    fn read_lobby(&mut self, cx: &mut Context<Self>) {
         self.load = Load::Loading;
         let source = self.source.clone();
         let library = self.game.read(cx).library.clone();
+        let lan = self.lan_servers.clone();
+        let kept: Vec<(String, String)> = self
+            .saved
+            .addresses()
+            .map(|kept| (kept.address.clone(), kept.name.clone()))
+            .collect();
         let reading = cx.background_executor().spawn(async move {
             let player = source.player()?;
             let lobby = source.servers(&player)?;
-            Ok::<_, muretto_core::Error>((
-                player,
-                lobby.stale,
-                Listing::new(lobby.servers, &library),
-            ))
+            let mut servers = lobby.servers;
+            // Kept servers the lobby does not list may still be up: ask them.
+            let listed: HashSet<String> = servers.iter().map(Server::address).collect();
+            let mut asked = HashSet::new();
+            let asking: Vec<_> = kept
+                .into_iter()
+                .filter(|(address, _)| !listed.contains(address) && asked.insert(address.clone()))
+                .map(|(address, name)| {
+                    let source = source.clone();
+                    std::thread::spawn(move || {
+                        let (ip, port) = address.rsplit_once(':')?;
+                        let answer = source.info(ip, port.parse().ok()?);
+                        Some(match answer {
+                            Ok(mut server) => {
+                                server.found = Found::Direct;
+                                Ok(server)
+                            }
+                            Err(_) => Err((address, name)),
+                        })
+                    })
+                })
+                .collect();
+            let mut unanswered = Vec::new();
+            for asking in asking {
+                match asking.join().ok().flatten() {
+                    Some(Ok(server)) => servers.push(server),
+                    Some(Err(kept)) => unanswered.push(kept),
+                    None => {}
+                }
+            }
+            let listing = Listing::new(servers.iter().cloned().chain(lan).collect(), &library);
+            Ok::<_, Error>((player, lobby.stale, servers, unanswered, listing, library))
         });
         cx.spawn(async move |this, cx| {
             let result = reading.await;
             this.update(cx, |this, cx| {
                 match result {
-                    Ok((player, stale, listing)) => {
+                    Ok((player, stale, servers, unanswered, listing, library)) => {
                         this.stale = stale.map(|(age, why)| {
                             format!("Showing the list from {} ago. {why}", age_text(age)).into()
                         });
-                        // Keep the same server selected if it is still listed.
-                        let selected = this.selected().map(|listed| listed.server.address());
                         this.player = Some(player);
-                        this.listing = Arc::new(listing);
-                        this.selected = selected.and_then(|address| {
-                            this.listing
-                                .servers
-                                .iter()
-                                .position(|listed| listed.server.address() == address)
-                        });
-                        if this.selected.is_none() {
-                            this.slots = None;
-                            this.car = None;
-                        }
+                        this.unanswered = unanswered;
+                        let targets: Vec<SocketAddr> =
+                            servers.iter().filter_map(Server::ping_address).collect();
+                        this.servers = Arc::new(servers);
+                        this.show_listing(listing, library);
                         this.load = Load::Ready;
-                        this.refilter();
+                        this.start_pinging(targets, cx);
                     }
                     Err(error) => {
                         // Keep showing the list there is, and say why it is old.
@@ -209,8 +410,176 @@ impl OnlineScreen {
         cx.notify();
     }
 
+    /// Asks the local network which servers run on it.
+    fn search_lan(&mut self, cx: &mut Context<Self>) {
+        if self.is_searching_lan() {
+            return;
+        }
+        self.lan = Lan::Searching;
+        let source = self.source.clone();
+        let searching = cx.background_executor().spawn(async move { source.lan() });
+        cx.spawn(async move |this, cx| {
+            let result = searching.await;
+            this.update(cx, |this, cx| {
+                this.lan = Lan::Searched;
+                this.lan_servers = result.unwrap_or_default();
+                let targets = this
+                    .lan_servers
+                    .iter()
+                    .filter_map(Server::ping_address)
+                    .collect();
+                this.relist(cx);
+                this.start_pinging(targets, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Works the servers out again against the installed content.
+    fn relist(&mut self, cx: &mut Context<Self>) {
+        let library = self.game.read(cx).library.clone();
+        let servers: Vec<Server> = self
+            .servers
+            .iter()
+            .cloned()
+            .chain(self.lan_servers.iter().cloned())
+            .collect();
+        let listing = cx
+            .background_executor()
+            .spawn(async move { (Listing::new(servers, &library), library) });
+        cx.spawn(async move |this, cx| {
+            let (listing, library) = listing.await;
+            this.update(cx, |this, cx| {
+                this.show_listing(listing, library);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Puts a new listing on show, keeping the same server selected if it
+    /// is still listed.
+    fn show_listing(&mut self, listing: Listing, library: Arc<Library>) {
+        let selected = self.selected().map(|listed| listed.server.address());
+        self.listing = Arc::new(listing);
+        self.listed_library = library;
+        self.selected = selected.and_then(|address| {
+            self.listing
+                .servers
+                .iter()
+                .position(|listed| listed.server.address() == address)
+        });
+        if self.selected.is_none() {
+            self.slots = None;
+            self.offers = None;
+            self.car = None;
+        } else if self.car.as_ref().is_none_or(|car| !self.installed(car)) {
+            // A car that has just been installed can now be taken.
+            self.car = self.default_car();
+        }
+        self.index_pings();
+        self.refilter();
+    }
+
+    /// Pings the servers in the background and shows each answer as it
+    /// comes.
+    fn start_pinging(&mut self, targets: Vec<SocketAddr>, cx: &mut Context<Self>) {
+        if targets.is_empty() {
+            return;
+        }
+        let (send, answers) = mpsc::channel();
+        let source = self.source.clone();
+        std::thread::spawn(move || {
+            source.ping(&targets, &mut |from, took| {
+                let _ = send.send((from, took));
+            });
+        });
+        // Answers are collected off the interface thread, a quarter of a
+        // second's worth at a time, and shown together.
+        let answers = Arc::new(std::sync::Mutex::new(answers));
+        cx.spawn(async move |this, cx| {
+            loop {
+                let answers = answers.clone();
+                let (batch, finished) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let answers = answers.lock().unwrap();
+                        let mut batch = Vec::new();
+                        let started = std::time::Instant::now();
+                        let quarter = Duration::from_millis(250);
+                        loop {
+                            let left = quarter.saturating_sub(started.elapsed());
+                            match answers.recv_timeout(left) {
+                                Ok(answer) => batch.push(answer),
+                                Err(mpsc::RecvTimeoutError::Timeout) => break (batch, false),
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break (batch, true),
+                            }
+                        }
+                    })
+                    .await;
+                if !batch.is_empty() && this.update(cx, |this, cx| this.pinged(batch, cx)).is_err()
+                {
+                    break;
+                }
+                if finished {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn pinged(&mut self, answers: Vec<(SocketAddr, Duration)>, cx: &mut Context<Self>) {
+        for (from, took) in answers {
+            self.pings.insert(from, took.as_millis() as u32);
+        }
+        self.index_pings();
+        if self.order.column == Column::Ping {
+            self.refilter();
+        }
+        cx.notify();
+    }
+
+    fn index_pings(&mut self) {
+        self.ping_by_index = self
+            .listing
+            .servers
+            .iter()
+            .map(|listed| {
+                listed
+                    .server
+                    .ping_address()
+                    .and_then(|address| self.pings.get(&address).copied())
+            })
+            .collect();
+    }
+
     fn refilter(&mut self) {
-        self.matching = self.listing.matching(&self.filter);
+        self.matching = self
+            .listing
+            .matching(&self.filter, self.order, &self.ping_by_index);
+    }
+
+    /// Sorts by `column`, or turns the order round if it already is.
+    pub fn sort_by(&mut self, column: Column, cx: &mut Context<Self>) {
+        self.order = self.order.by(column);
+        self.refilter();
+        cx.notify();
+    }
+
+    /// Stars the server at `index` in the listing, or takes the star away.
+    pub fn toggle_favourite(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(listed) = self.listing.servers.get(index) else {
+            return;
+        };
+        let _ = self.saved.toggle_favourite(&listed.server);
+        self.filter.scope = self.scope();
+        self.refilter();
+        cx.notify();
     }
 
     fn edit_filter(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Filter)) {
@@ -255,6 +624,9 @@ impl OnlineScreen {
         }
         self.selected = Some(index);
         self.slots = Some(Slots::Loading);
+        self.offers = None;
+        self.fetched = None;
+        self.show_traffic = false;
         self.launch = Launch::Idle;
         self.car = self.default_car();
         cx.notify();
@@ -262,6 +634,9 @@ impl OnlineScreen {
         let (Some(player), Some(listed)) = (self.player.clone(), self.selected().cloned()) else {
             return;
         };
+        if missing_text(&listed).is_some() {
+            self.ask_for_offers(index, &listed.server, cx);
+        }
         let source = self.source.clone();
         let asking = cx
             .background_executor()
@@ -292,8 +667,131 @@ impl OnlineScreen {
         .detach();
     }
 
+    /// Asks the server where its content can be downloaded.
+    fn ask_for_offers(&mut self, index: usize, server: &Server, cx: &mut Context<Self>) {
+        if server.details_port.is_none() {
+            self.offers = Some(Offers::Loaded(Vec::new()));
+            return;
+        }
+        self.offers = Some(Offers::Loading);
+        let (source, server) = (self.source.clone(), server.clone());
+        let asking = cx
+            .background_executor()
+            .spawn(async move { source.offers(&server) });
+        cx.spawn(async move |this, cx| {
+            let result = asking.await;
+            this.update(cx, |this, cx| {
+                if this.selected != Some(index) {
+                    return;
+                }
+                this.offers = Some(match result {
+                    Ok(offers) => Offers::Loaded(offers),
+                    Err(error) => Offers::Failed(error.to_string().into()),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Downloads and installs what the links point at, one after another.
+    pub fn fetch(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
+        if self.fetching.is_some() || urls.is_empty() {
+            return;
+        }
+        self.fetched = None;
+        let install = self.game.read(cx).install.clone();
+        let title = match urls.len() {
+            1 => "Getting the content".to_owned(),
+            n => format!("Getting {n} downloads"),
+        };
+        self.fetching = Some(Job::start(
+            title,
+            install,
+            cx,
+            move |install, progress| {
+                let mut added = Added::default();
+                let mut failed = Vec::new();
+                for url in &urls {
+                    match install_offer(install, url, progress) {
+                        Ok(more) => {
+                            added.cars.extend(more.cars);
+                            added.tracks.extend(more.tracks);
+                            added.kept.extend(more.kept);
+                        }
+                        Err(Error::Cancelled) => return Err(Error::Cancelled),
+                        Err(error) => failed.push(error.to_string()),
+                    }
+                }
+                Ok((added, failed, Library::scan(install)))
+            },
+            |this, result, cx| {
+                this.fetching = None;
+                this.fetched = match result {
+                    Ok((added, failed, library)) => {
+                        this.game
+                            .update(cx, |game, cx| game.set_library(library, cx));
+                        let mut text = added_text(&added);
+                        if !failed.is_empty() {
+                            text = format!("{text} Not everything came: {}", failed.join(" "));
+                        }
+                        Some((text.into(), failed.is_empty()))
+                    }
+                    Err(Error::Cancelled) => None,
+                    Err(error) => Some((error.to_string().into(), false)),
+                };
+            },
+        ));
+        cx.notify();
+    }
+
+    /// Opens a download page in the browser, and a dialog to take what was
+    /// downloaded there.
+    pub fn get_from_page(
+        &mut self,
+        offer: &Offer,
+        wanted: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let game = self.game.clone();
+        let (url, host) = (offer.url.clone(), offer.host().to_owned());
+        let dialog = cx.new(|cx| ContentDialog::new(game, url, host, wanted, window, cx));
+        let closed = cx.subscribe(&dialog, |this, _, _: &ContentEvent, cx| {
+            this.dialog = None;
+            cx.notify();
+        });
+        self.dialog = Some((dialog, closed));
+        cx.notify();
+    }
+
+    pub fn dialog(&self) -> Option<&Entity<ContentDialog>> {
+        self.dialog.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    pub fn is_fetching(&self) -> bool {
+        self.fetching.is_some()
+    }
+
+    fn installed(&self, car: &str) -> bool {
+        self.listing.car(car).is_some_and(|known| known.installed)
+    }
+
+    /// Whether `car` on the selected server is AI traffic. The server's
+    /// slots say; until they have, its name is the guess.
+    pub fn is_traffic(&self, car: &str) -> bool {
+        if let Some(Slots::Loaded(slots)) = &self.slots {
+            let mut of_car = slots.iter().filter(|slot| slot.car == car).peekable();
+            if of_car.peek().is_some() {
+                return of_car.all(|slot| slot.ai);
+            }
+        }
+        looks_like_traffic(car)
+    }
+
     pub fn choose_car(&mut self, car: &str, cx: &mut Context<Self>) {
-        if self.listing.car(car).is_some_and(|known| known.installed) {
+        if self.installed(car) && !self.is_traffic(car) {
             self.car = Some(car.to_owned());
             self.launch = Launch::Idle;
             cx.notify();
@@ -306,7 +804,7 @@ impl OnlineScreen {
             Some(Slots::Loaded(slots)) => Some(
                 slots
                     .iter()
-                    .filter(|slot| slot.car == car && (!slot.connected || slot.yours))
+                    .filter(|slot| slot.car == car && !slot.ai && (!slot.connected || slot.yours))
                     .count(),
             ),
             _ => None,
@@ -326,9 +824,7 @@ impl OnlineScreen {
             .server
             .cars
             .iter()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter(|car| self.listing.car(car).is_some_and(|known| known.installed))
+            .filter(|car| self.installed(car) && !self.is_traffic(car))
             .collect();
         installed
             .iter()
@@ -398,6 +894,7 @@ impl OnlineScreen {
             driver_name: &game.session().driver_name,
             password: &password,
         };
+        let server = listed.server.clone();
         self.launch = match launch::join(&game.install, &join) {
             Ok(mut child) => {
                 std::thread::spawn(move || {
@@ -407,6 +904,11 @@ impl OnlineScreen {
             }
             Err(error) => Launch::Failed(error.to_string().into()),
         };
+        if self.launch == Launch::Started {
+            let _ = self.saved.joined(&server);
+            self.filter.scope = self.scope();
+            self.refilter();
+        }
         cx.notify();
     }
 
@@ -487,10 +989,11 @@ impl OnlineScreen {
             .child(
                 button(
                     "online-refresh",
-                    if self.is_loading() {
-                        "Reading…"
-                    } else {
-                        "Refresh"
+                    match self.tab {
+                        Tab::Lan if self.is_searching_lan() => "Searching…",
+                        Tab::Lan => "Search again",
+                        _ if self.is_loading() => "Reading…",
+                        _ => "Refresh",
                     },
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -629,6 +1132,32 @@ impl OnlineScreen {
     }
 
     fn list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let order = self.order;
+        let heading = |column: Column, text: &str, width: Option<f32>, right: bool| {
+            let sorted = order.column == column;
+            let arrow = if order.descending {
+                "icons/chevron-down.svg"
+            } else {
+                "icons/chevron-up.svg"
+            };
+            div()
+                .id(("sort", column as usize))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .cursor_pointer()
+                .map(|cell| match width {
+                    Some(width) => cell.w(px(width)).flex_none(),
+                    None => cell.flex_1().min_w_0(),
+                })
+                .when(right, |cell| cell.justify_end())
+                .on_click(cx.listener(move |this, _, _, cx| this.sort_by(column, cx)))
+                .child(label(text).when(sorted, |text| text.text_color(rgb(color::TEXT))))
+                .when(sorted, |cell| {
+                    cell.child(svg().path(arrow).size(px(11.)).text_color(rgb(color::TEXT)))
+                })
+                .test_support()
+        };
         let header = div()
             .flex()
             .flex_none()
@@ -638,17 +1167,13 @@ impl OnlineScreen {
             .px(PAGE)
             .border_b_1()
             .border_color(rgb(color::BORDER))
-            .child(label("Server").flex_1().min_w_0())
-            .child(label("Track").w(px(190.)).flex_none())
-            .child(label("Cars").w(px(170.)).flex_none())
-            .child(label("Session").w(px(110.)).flex_none())
-            .child(
-                div()
-                    .w(px(64.))
-                    .flex()
-                    .justify_end()
-                    .child(label("Drivers")),
-            );
+            .child(div().w(px(STAR_W)).flex_none())
+            .child(heading(Column::Name, "Server", None, false))
+            .child(heading(Column::Track, "Track", Some(TRACK_W), false))
+            .child(heading(Column::Cars, "Cars", Some(CARS_W), false))
+            .child(heading(Column::Session, "Session", Some(SESSION_W), false))
+            .child(heading(Column::Drivers, "Drivers", Some(DRIVERS_W), true))
+            .child(heading(Column::Ping, "Ping", Some(PING_W), true));
 
         let count = self.matching.len();
         let rows = uniform_list(
@@ -679,11 +1204,7 @@ impl OnlineScreen {
                             .flex_1()
                             .items_center()
                             .justify_center()
-                            .child(muted(if self.filter.is_empty() {
-                                "The lobby lists no servers."
-                            } else {
-                                "No server matches. Loosen the filter to see more."
-                            })),
+                            .child(muted(self.empty_text())),
                     )
                 } else {
                     list.child(rows)
@@ -696,8 +1217,16 @@ impl OnlineScreen {
         let server = &listed.server;
         let selected = self.selected == Some(index);
         let track = self.listing.track_name(&listed.track_id).to_owned();
-        let cars = match server.cars.as_slice() {
+        // Traffic is not something to drive; say how many cars there are
+        // to choose from.
+        let drivable: Vec<&String> = server
+            .cars
+            .iter()
+            .filter(|car| !looks_like_traffic(car))
+            .collect();
+        let cars = match drivable.as_slice() {
             [one] => self.listing.car_name(one).to_owned(),
+            [] => format!("{} cars", server.cars.len()),
             all => format!("{} cars", all.len()),
         };
         let mut about: Vec<String> = Vec::new();
@@ -709,6 +1238,8 @@ impl OnlineScreen {
         }
         let missing = missing_text(listed);
         let full = server.free_slots() == 0;
+        let favourite = self.saved.is_favourite(&server.address());
+        let ping = self.ping(index);
 
         div()
             .id(("server", row))
@@ -731,6 +1262,37 @@ impl OnlineScreen {
                 }
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+            .child(
+                div()
+                    .id(("star", row))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(STAR_W))
+                    .h_full()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_favourite(index, cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(if favourite {
+                                "icons/star-fill.svg"
+                            } else {
+                                "icons/star.svg"
+                            })
+                            .size(px(12.))
+                            .text_color(rgb(if favourite {
+                                color::TEXT
+                            } else {
+                                color::BORDER_STRONG
+                            }))
+                            .hover(|style| style.text_color(rgb(color::TEXT_MUTED))),
+                    )
+                    .test_support(),
+            )
             .child(
                 div()
                     .flex()
@@ -779,7 +1341,7 @@ impl OnlineScreen {
             )
             .child(
                 div()
-                    .w(px(190.))
+                    .w(px(TRACK_W))
                     .flex_none()
                     .truncate()
                     .text_size(px(13.))
@@ -792,7 +1354,7 @@ impl OnlineScreen {
             )
             .child(
                 div()
-                    .w(px(170.))
+                    .w(px(CARS_W))
                     .flex_none()
                     .truncate()
                     .text_size(px(13.))
@@ -801,7 +1363,7 @@ impl OnlineScreen {
             )
             .child(
                 div()
-                    .w(px(110.))
+                    .w(px(SESSION_W))
                     .flex_none()
                     .flex()
                     .flex_col()
@@ -814,10 +1376,23 @@ impl OnlineScreen {
                     .child(mono(time_left(server), 11.).text_color(rgb(color::TEXT_DIM))),
             )
             .child(
-                div().w(px(64.)).flex().justify_end().child(
-                    mono(format!("{}/{}", server.clients, server.capacity), 13.)
-                        .text_color(rgb(if full { color::TEXT_DIM } else { color::TEXT })),
-                ),
+                div()
+                    .w(px(DRIVERS_W))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        mono(format!("{}/{}", server.clients, server.capacity), 13.)
+                            .text_color(rgb(if full { color::TEXT_DIM } else { color::TEXT })),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(PING_W))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .child(ping_text(ping, 12.5)),
             )
             .test_support()
             .into_any_element()
@@ -841,9 +1416,18 @@ impl OnlineScreen {
             )));
         };
         let server = &listed.server;
+        let index = self.selected.unwrap_or_default();
         let mut about: Vec<String> = Vec::new();
         if let Some((country, _)) = &server.country {
             about.push(country.clone());
+        }
+        if let Some(ping) = self.ping(index) {
+            about.push(format!("{ping} ms"));
+        }
+        match server.found {
+            Found::Lan => about.push("On this network".to_owned()),
+            Found::Direct => about.push("Not in the lobby".to_owned()),
+            Found::Lobby => {}
         }
         about.push(if server.password {
             "Password".to_owned()
@@ -864,12 +1448,27 @@ impl OnlineScreen {
                     .border_color(rgb(color::BORDER))
                     .child(
                         div()
-                            .font_family(font::DISPLAY)
-                            .font_weight(FontWeight::BOLD)
-                            .italic()
-                            .text_size(px(22.))
-                            .line_height(relative(1.1))
-                            .child(server.name.to_uppercase()),
+                            .flex()
+                            .items_start()
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .font_family(font::DISPLAY)
+                                    .font_weight(FontWeight::BOLD)
+                                    .italic()
+                                    .text_size(px(22.))
+                                    .line_height(relative(1.1))
+                                    .child(server.name.to_uppercase()),
+                            )
+                            .child(
+                                star_button(self.saved.is_favourite(&server.address()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_favourite(index, cx)
+                                    }))
+                                    .test_support(),
+                            ),
                     )
                     .child(muted(about.join(" · "))),
             )
@@ -889,6 +1488,8 @@ impl OnlineScreen {
                 )
             })
             .child(self.track_box(listed, cx))
+            // What blocks joining comes before the choice of car.
+            .children(self.content_box(listed, cx))
             .child(self.cars_box(listed, cx))
             .child(self.drivers_box())
             .child(self.join_box(listed, cx))
@@ -943,27 +1544,31 @@ impl OnlineScreen {
 
     fn cars_box(&self, listed: &Listed, cx: &mut Context<Self>) -> impl IntoElement {
         let server = &listed.server;
+        // AI traffic cannot be driven; it goes in its own group at the end.
+        let (traffic, mut cars): (Vec<&String>, Vec<&String>) =
+            server.cars.iter().partition(|car| self.is_traffic(car));
         // Cars the player can take first, then full ones, then the rest.
-        let mut cars: Vec<&String> = server.cars.iter().collect();
-        cars.sort_by_key(|car| {
-            let installed = self.listing.car(car).is_some_and(|k| k.installed);
-            match (installed, self.free(car)) {
-                (true, Some(0)) => 1,
-                (true, _) => 0,
-                (false, _) => 2,
-            }
+        cars.sort_by_key(|car| match (self.installed(car), self.free(car)) {
+            (true, Some(0)) => 1,
+            (true, _) => 0,
+            (false, _) => 2,
         });
-        let free_total = match &self.slots {
-            Some(Slots::Loaded(slots)) => Some(slots.iter().filter(|s| !s.connected).count()),
-            _ => None,
+        let (free_total, slots_total) = match &self.slots {
+            Some(Slots::Loaded(slots)) => {
+                let players = slots.iter().filter(|s| !s.ai);
+                (
+                    Some(players.clone().filter(|s| !s.connected).count()),
+                    players.count(),
+                )
+            }
+            _ => (None, server.capacity as usize),
         };
         let heading = match free_total {
-            Some(free) => format!("Your car · {free} of {} slots free", server.capacity),
+            Some(free) => format!("Your car · {free} of {slots_total} slots free"),
             None => format!("Your car · {} to choose from", cars.len()),
         };
         let rows = cars.into_iter().enumerate().map(|(index, car)| {
-            let known = self.listing.car(car);
-            let installed = known.is_some_and(|k| k.installed);
+            let installed = self.installed(car);
             let chosen = self.car.as_deref() == Some(car.as_str());
             let free = self.free(car);
             let state = match (installed, free) {
@@ -1027,6 +1632,85 @@ impl OnlineScreen {
                 })
                 .test_support()
         });
+
+        let traffic_missing = traffic.iter().filter(|car| !self.installed(car)).count();
+        let traffic_group = (!traffic.is_empty()).then(|| {
+            let summary = match (traffic.len(), traffic_missing) {
+                (1, 0) => "1 car, installed".to_owned(),
+                (1, _) => "1 car, not installed".to_owned(),
+                (n, 0) => format!("{n} cars, all installed"),
+                (n, missing) => format!("{n} cars, {missing} not installed"),
+            };
+            let open = self.show_traffic;
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .id("traffic")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .h(px(32.))
+                        .px(px(12.))
+                        .rounded(RADIUS)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(color::RAISED)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_traffic = !this.show_traffic;
+                            cx.notify();
+                        }))
+                        .child(
+                            svg()
+                                .path(if open {
+                                    "icons/chevron-up.svg"
+                                } else {
+                                    "icons/chevron-down.svg"
+                                })
+                                .size(px(12.))
+                                .text_color(rgb(color::TEXT_MUTED)),
+                        )
+                        .child(div().text_size(px(13.)).child("AI traffic"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(12.5))
+                                .text_color(rgb(color::TEXT_MUTED))
+                                .child(summary),
+                        )
+                        .test_support(),
+                )
+                .when(open, |group| {
+                    group.children(traffic.iter().map(|car| {
+                        let installed = self.installed(car);
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap(px(12.))
+                            .pl(px(32.))
+                            .pr(px(12.))
+                            .text_size(px(12.5))
+                            .text_color(rgb(color::TEXT_MUTED))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(self.listing.car_name(car).to_owned()),
+                            )
+                            .child(
+                                mono(
+                                    if installed {
+                                        "installed"
+                                    } else {
+                                        "not installed"
+                                    },
+                                    11.5,
+                                )
+                                .text_color(rgb(color::TEXT_DIM)),
+                            )
+                    }))
+                })
+        });
         div()
             .flex()
             .flex_col()
@@ -1035,6 +1719,188 @@ impl OnlineScreen {
             .pt(px(16.))
             .child(label(&heading))
             .children(rows)
+            .children(traffic_group)
+    }
+
+    /// What the server needs that the player lacks, and where to get it.
+    fn content_box(&self, listed: &Listed, cx: &mut Context<Self>) -> Option<Div> {
+        let missing = missing_text(listed)?;
+        let server = &listed.server;
+        // (kind, folder name, shown name), the track first, traffic last.
+        let mut wanted: Vec<(Kind, String, String)> = Vec::new();
+        if !listed.track_installed {
+            wanted.push((
+                Kind::Track,
+                listed.track_id.clone(),
+                self.listing.track_name(&listed.track_id).to_owned(),
+            ));
+        }
+        let mut cars: Vec<&String> = server
+            .cars
+            .iter()
+            .filter(|car| !self.installed(car))
+            .collect();
+        cars.sort_by_key(|car| self.is_traffic(car));
+        wanted.extend(cars.into_iter().map(|car| {
+            (
+                Kind::Car,
+                car.clone(),
+                self.listing.car_name(car).to_owned(),
+            )
+        }));
+
+        let offers: &[Offer] = match &self.offers {
+            Some(Offers::Loaded(offers)) => offers,
+            _ => &[],
+        };
+        let offer_for = |kind: Kind, id: &str| {
+            offers.iter().find(|offer| {
+                offer.kind == kind && (kind == Kind::Track || offer.id.eq_ignore_ascii_case(id))
+            })
+        };
+        // Downloads several items share are fetched once.
+        let mut direct: Vec<String> = Vec::new();
+        for (kind, id, _) in &wanted {
+            if let Some(offer) = offer_for(*kind, id).filter(|offer| offer.is_direct())
+                && !direct.contains(&offer.url)
+            {
+                direct.push(offer.url.clone());
+            }
+        }
+
+        let status = match &self.offers {
+            _ if server.details_port.is_none() => {
+                Some("The server does not say where to get its content.".to_owned())
+            }
+            None | Some(Offers::Loading) => {
+                Some("Asking the server for download links…".to_owned())
+            }
+            Some(Offers::Failed(error)) => Some(format!(
+                "The server did not say where to get its content: {error}"
+            )),
+            Some(Offers::Loaded(offers)) if offers.is_empty() => {
+                Some("The server offers no download links.".to_owned())
+            }
+            Some(Offers::Loaded(_)) => None,
+        };
+
+        const SHOWN: usize = 12;
+        let more = wanted.len().saturating_sub(SHOWN);
+        let names_by_url = |url: &str| -> Vec<String> {
+            wanted
+                .iter()
+                .filter(|(kind, id, _)| offer_for(*kind, id).is_some_and(|o| o.url == url))
+                .map(|(_, _, name)| name.clone())
+                .collect()
+        };
+        let rows = wanted
+            .iter()
+            .take(SHOWN)
+            .enumerate()
+            .map(|(row, (kind, id, name))| {
+                let offer = offer_for(*kind, id).cloned();
+                let action: AnyElement =
+                    match offer {
+                        _ if self.fetching.is_some() => div().into_any_element(),
+                        Some(offer) if offer.is_direct() => {
+                            let url = offer.url.clone();
+                            button(("fetch", row), "Download")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.fetch(vec![url.clone()], cx)
+                                }))
+                                .into_any_element()
+                        }
+                        Some(offer) => {
+                            let wanted = names_by_url(&offer.url);
+                            button(("page", row), format!("Open {}", offer.host()))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.get_from_page(&offer, wanted.clone(), window, cx)
+                                }))
+                                .into_any_element()
+                        }
+                        None => mono("no link", 11.5)
+                            .text_color(rgb(color::TEXT_DIM))
+                            .into_any_element(),
+                    };
+                let version = offer_for(*kind, id).and_then(|offer| offer.version.clone());
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .min_h(px(32.))
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(rgb(color::TEXT_DIM))
+                            .child(match kind {
+                                Kind::Track => "Track",
+                                Kind::Car if self.is_traffic(id) => "AI",
+                                Kind::Car => "Car",
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .child(name.clone()),
+                    )
+                    .when_some(version, |row, version| {
+                        row.child(mono(version, 11.5).text_color(rgb(color::TEXT_MUTED)))
+                    })
+                    .child(action)
+            });
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .px(px(20.))
+                .pt(px(16.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(label(&format!("Missing · {missing}")))
+                        .when(direct.len() > 1 && self.fetching.is_none(), |row| {
+                            let count = direct.len();
+                            row.child(
+                                button("fetch-all", format!("Download all {count}")).on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.fetch(direct.clone(), cx)
+                                    }),
+                                ),
+                            )
+                        }),
+                )
+                .when_some(self.fetching.as_ref(), |column, job| {
+                    column.child(div().py(px(6.)).child(job.strip()))
+                })
+                .when_some(self.fetched.clone(), |column, (text, good)| {
+                    column.child(
+                        div()
+                            .text_size(px(12.5))
+                            .line_height(relative(1.4))
+                            .text_color(rgb(if good {
+                                color::GOOD
+                            } else {
+                                color::ACCENT_TEXT
+                            }))
+                            .child(text),
+                    )
+                })
+                .when_some(status, |column, status| column.child(muted(status)))
+                .children(rows)
+                .when(more > 0, |column| {
+                    column.child(muted(format!("And {more} more.")))
+                }),
+        )
     }
 
     fn drivers_box(&self) -> impl IntoElement {
@@ -1156,6 +2022,7 @@ impl Render for OnlineScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().id("online").relative().flex().size_full();
         match &self.load {
+            _ if self.tab == Tab::Lan => {}
             Load::Idle | Load::Loading if self.listing.servers.is_empty() => {
                 return root.child(centered(
                     "Reading the lobby",
@@ -1183,26 +2050,106 @@ impl Render for OnlineScreen {
                 .flex_1()
                 .min_w_0()
                 .child(self.toolbar(cx))
-                .when_some(self.stale.clone(), |column, stale| {
-                    column.child(
-                        div()
-                            .mx(PAGE)
-                            .mt(px(10.))
-                            .px(px(12.))
-                            .py(px(8.))
-                            .rounded(RADIUS)
-                            .bg(rgb(color::RAISED))
-                            .text_size(px(12.5))
-                            .text_color(rgb(color::WARN))
-                            .child(stale),
-                    )
+                .when_some(
+                    self.stale.clone().filter(|_| self.tab != Tab::Lan),
+                    |column, stale| column.child(note(stale)),
+                )
+                .when_some(self.unanswered_text(), |column, text| {
+                    column.child(note(text.into()))
                 })
                 .child(self.facet_bar(cx))
                 .child(self.list(cx)),
         )
         .child(self.detail(cx))
         .children(self.picker.as_ref().map(|(picker, _)| picker.clone()))
+        .children(self.dialog.as_ref().map(|(dialog, _)| dialog.clone()))
     }
+}
+
+impl OnlineScreen {
+    /// What the list says when nothing is in it.
+    fn empty_text(&self) -> &'static str {
+        if !self.filter.is_empty() {
+            return "No server matches. Loosen the filter to see more.";
+        }
+        match self.tab {
+            Tab::All => "The lobby lists no servers.",
+            Tab::Favourites => "No favourites yet. Star a server to keep it here.",
+            Tab::Recent => "Servers you join show up here.",
+            Tab::Lan if self.is_searching_lan() => "Looking for servers on this network…",
+            Tab::Lan => {
+                "No server answered on this network. Servers set up for a LAN answer on ports 9456–9458, 9556, 9600–9612 or 9700."
+            }
+        }
+    }
+
+    /// Kept servers of this tab that could not be reached.
+    fn unanswered_text(&self) -> Option<String> {
+        let kept: BTreeSet<&str> = match self.tab {
+            Tab::Favourites => self.saved.favourites.iter(),
+            Tab::Recent => self.saved.recent.iter(),
+            _ => return None,
+        }
+        .map(|kept| kept.address.as_str())
+        .collect();
+        let names: Vec<&str> = self
+            .unanswered
+            .iter()
+            .filter(|(address, _)| kept.contains(address.as_str()))
+            .map(|(_, name)| name.as_str())
+            .collect();
+        (!names.is_empty()).then(|| format!("Not answering: {}.", names.join(", ")))
+    }
+}
+
+fn note(text: SharedString) -> Div {
+    div()
+        .mx(PAGE)
+        .mt(px(10.))
+        .px(px(12.))
+        .py(px(8.))
+        .rounded(RADIUS)
+        .bg(rgb(color::RAISED))
+        .text_size(px(12.5))
+        .text_color(rgb(color::WARN))
+        .child(text)
+}
+
+/// "18 ms", in the warning colour when slow, or a dash before an answer.
+fn ping_text(ping: Option<u32>, size: f32) -> Div {
+    match ping {
+        Some(ms) => mono(format!("{ms} ms"), size).text_color(rgb(if ms >= SLOW_PING {
+            color::WARN
+        } else {
+            color::TEXT_MUTED
+        })),
+        None => mono("—", size).text_color(rgb(color::TEXT_DIM)),
+    }
+}
+
+fn star_button(on: bool) -> Stateful<Div> {
+    div()
+        .id("favourite")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(32.))
+        .rounded(RADIUS)
+        .border_1()
+        .border_color(rgb(color::BORDER_STRONG))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(color::RAISED)))
+        .child(
+            svg()
+                .path(if on {
+                    "icons/star-fill.svg"
+                } else {
+                    "icons/star.svg"
+                })
+                .size(px(14.))
+                .text_color(rgb(color::TEXT)),
+        )
 }
 
 /// "the track, 6 cars", or nothing when everything is installed.

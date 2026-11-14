@@ -6,6 +6,7 @@
 //! unpacks it beside the game, checks it, moves the files into place and
 //! writes a [`Receipt`] listing them.
 
+pub mod content;
 pub mod csp;
 pub mod recipes;
 pub mod weather_fx;

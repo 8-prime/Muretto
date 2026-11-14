@@ -50,6 +50,14 @@ impl Game {
         cx.notify();
     }
 
+    /// Takes a fresh reading of the game's content, after cars or tracks
+    /// were added.
+    pub fn set_library(&mut self, library: Library, cx: &mut Context<Self>) {
+        self.library = Arc::new(library);
+        self.installed_revision += 1;
+        cx.notify();
+    }
+
     pub fn session(&self) -> &SessionConfig {
         &self.session
     }

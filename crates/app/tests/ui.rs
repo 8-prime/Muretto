@@ -2,8 +2,11 @@
 //! game folder built on disk, and checks what the session becomes.
 
 use std::{
+    io::{Read as _, Write as _},
+    net::{SocketAddr, TcpListener},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use gpui_kit::{
@@ -18,7 +21,10 @@ use muretto::{
 };
 use muretto_core::{
     Error, Install, Library,
-    online::{self, Facet, Lobby, Server, Slot},
+    online::{
+        self, Column, Facet, Found, Lobby, Server, Slot,
+        offers::{Kind, Offer},
+    },
     packages::{Progress, csp, recipes::PURE, weather_fx},
     session::SessionMode,
     steam::SteamUser,
@@ -115,17 +121,22 @@ impl csp::Source for Shelf {
 }
 
 /// Stands in for the official lobby: three servers, one on a track the
-/// fixture lacks, and slots that leave only the second car free.
-struct Paddock;
+/// fixture lacks, and slots that leave only the second car free. Another
+/// server is up but unlisted, and one more runs on the local network.
+#[derive(Default)]
+struct Paddock {
+    /// Where the missing car can be downloaded straight away.
+    car_url: String,
+}
 
 const PADDOCK: &str = r#"[
   {"ip":"10.0.0.1","port":9600,"cport":8081,"tport":9600,"name":"Park Sprint","clients":3,"maxclients":4,
    "track":"park-short","cars":["alpha_gt3","beta_gt3"],"session":3,"sessiontypes":[1,3],"durations":[10,8],
    "timeleft":300,"country":["Italy","IT"],"pass":false},
-  {"ip":"10.0.0.2","port":9600,"cport":8081,"tport":9600,"name":"Ring Cruise","clients":1,"maxclients":10,
-   "track":"ring","cars":["gamma_road","delta_missing"],"session":1,"sessiontypes":[1],"durations":[60],
+  {"ip":"10.0.0.2","port":9600,"cport":8081,"tport":9600,"name":"Ring Cruise ℹ8082","clients":1,"maxclients":10,
+   "track":"ring","cars":["gamma_road","delta_missing","traffic_van"],"session":1,"sessiontypes":[1],"durations":[60],
    "timeleft":1200,"country":["Germany","DE"],"pass":false},
-  {"ip":"10.0.0.3","port":9600,"cport":8081,"tport":9600,"name":"Faraway","clients":0,"maxclients":20,
+  {"ip":"10.0.0.3","port":9600,"cport":8081,"tport":9600,"name":"Faraway ℹ8082","clients":0,"maxclients":20,
    "track":"csp/2651/../faraway","cars":["alpha_gt3"],"session":1,"sessiontypes":[1],"durations":[60],
    "timeleft":0,"country":["Japan","JP"],"pass":true}
 ]"#;
@@ -152,6 +163,7 @@ impl online::Source for Paddock {
             driver: driver.map(str::to_owned),
             connected: driver.is_some(),
             yours: false,
+            ai: false,
         };
         Ok(match server.name.as_str() {
             "Park Sprint" => vec![
@@ -160,19 +172,110 @@ impl online::Source for Paddock {
                 slot("beta_gt3", Some("R. Castellano")),
                 slot("beta_gt3", None),
             ],
+            "Ring Cruise" => vec![
+                slot("gamma_road", Some("J. van Dijk")),
+                slot("gamma_road", None),
+                slot("delta_missing", None),
+                Slot {
+                    ai: true,
+                    ..slot("traffic_van", None)
+                },
+            ],
+            _ => Vec::new(),
+        })
+    }
+
+    fn info(&self, ip: &str, http_port: u16) -> muretto_core::Result<Server> {
+        if ip != "10.0.0.9" {
+            return Err(Error::Network("No answer.".to_owned()));
+        }
+        online::parse_info(
+            r#"{"port":9600,"tport":9600,"name":"Garage","clients":2,"maxclients":8,"track":"ring",
+                "cars":["gamma_road"],"session":1,"sessiontypes":[1]}"#,
+            ip,
+            http_port,
+        )
+    }
+
+    fn lan(&self) -> muretto_core::Result<Vec<Server>> {
+        let mut server = online::parse_info(
+            r#"{"port":9600,"tport":9600,"name":"Office LAN","clients":0,"maxclients":8,"track":"park-long",
+                "cars":["alpha_gt3"],"session":1,"sessiontypes":[1]}"#,
+            "192.168.1.20",
+            8081,
+        )?;
+        server.found = Found::Lan;
+        Ok(vec![server])
+    }
+
+    fn ping(&self, targets: &[SocketAddr], answered: &mut dyn FnMut(SocketAddr, Duration)) {
+        for target in targets {
+            match target.ip().to_string().as_str() {
+                "10.0.0.1" => answered(*target, Duration::from_millis(30)),
+                "10.0.0.2" => answered(*target, Duration::from_millis(120)),
+                _ => {}
+            }
+        }
+    }
+
+    fn offers(&self, server: &Server) -> muretto_core::Result<Vec<Offer>> {
+        Ok(match server.name.as_str() {
+            "Ring Cruise" => vec![Offer {
+                kind: Kind::Car,
+                id: "delta_missing".to_owned(),
+                version: Some("1.2".to_owned()),
+                url: self.car_url.clone(),
+            }],
+            "Faraway" => vec![Offer {
+                kind: Kind::Track,
+                id: String::new(),
+                version: None,
+                url: "https://drive.example.com/file/faraway".to_owned(),
+            }],
             _ => Vec::new(),
         })
     }
 }
 
+/// Serves `body` once over HTTP on the loopback interface; returns its URL.
+fn serve_once(name: &str, body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/{name}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = stream.read(&mut request);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+    });
+    url
+}
+
+/// A zip holding the files given as (path, contents).
+fn zip_bytes(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, contents) in files {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(contents.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
 fn open(cx: &mut TestAppContext, root: &Path) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
-    open_with(cx, root, Shelf { online: true })
+    open_with(cx, root, Shelf { online: true }, Paddock::default())
 }
 
 fn open_with(
     cx: &mut TestAppContext,
     root: &Path,
     patches: Shelf,
+    servers: Paddock,
 ) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
     let install = Install::at(root.to_path_buf(), None);
     let library = Library::scan(&install);
@@ -191,7 +294,9 @@ fn open_with(
             |window, cx| {
                 let sources = Sources {
                     patches: Arc::new(patches),
-                    servers: Arc::new(Paddock),
+                    servers: Arc::new(servers),
+                    // Beside the game folder, so each test keeps its own.
+                    saved_servers: Some(saved_servers(root)),
                 };
                 cx.new(|cx| Shell::with_content(install, library, sources, window, cx))
             },
@@ -204,6 +309,10 @@ fn open_with(
             .clone();
         (window, game, shell)
     })
+}
+
+fn saved_servers(root: &Path) -> PathBuf {
+    root.parent().unwrap().join("servers.json")
 }
 
 /// One user action, followed by everything it sets in motion. Events a view
@@ -402,7 +511,7 @@ fn the_patch_is_installed_updated_and_removed_from_settings(cx: &mut TestAppCont
 #[gpui_kit::test]
 fn without_a_connection_the_known_builds_are_offered_and_failure_is_shown(cx: &mut TestAppContext) {
     let root = game_folder("offline");
-    let (window, game, _) = open_with(cx, &root, Shelf { online: false });
+    let (window, game, _) = open_with(cx, &root, Shelf { online: false }, Paddock::default());
     act(cx, window, |window, cx| window.click(SETTINGS, cx));
     act(cx, window, |window, cx| window.click("patch-install", cx));
     cx.update(|cx| assert_eq!(game.read(cx).patch, None));
@@ -642,5 +751,154 @@ fn servers_are_narrowed_by_ticking_a_track_and_joined(cx: &mut TestAppContext) {
         ] {
             assert!(race.contains(&format!("{line}\r\n")), "{line} in {race}");
         }
+    });
+}
+
+/// Lets work on other threads (pings) land, then whatever it set in motion.
+fn settle(cx: &mut TestAppContext) {
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(20));
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn servers_are_sorted_starred_found_on_the_network_and_completed(cx: &mut TestAppContext) {
+    let root = game_folder("online-more");
+    // Kept from an earlier run: a favourite the lobby does not list, one
+    // that is gone, and a recently joined server.
+    std::fs::write(
+        saved_servers(&root),
+        r#"{"favourites":[{"address":"10.0.0.9:8081","name":"Garage","at":1},
+                          {"address":"10.0.0.8:8081","name":"Gone","at":2}],
+            "recent":[{"address":"10.0.0.1:8081","name":"Park Sprint","at":3}]}"#,
+    )
+    .unwrap();
+    let car = zip_bytes(&[
+        (
+            "Delta 1.2/content/cars/delta_missing/ui/ui_car.json",
+            r#"{"name": "Delta Missing", "brand": "Works", "class": "street"}"#,
+        ),
+        ("Delta 1.2/content/cars/delta_missing/data/car.ini", ""),
+        (
+            "Delta 1.2/content/cars/delta_missing/skins/red/ui_skin.json",
+            "{}",
+        ),
+    ]);
+    let paddock = Paddock {
+        car_url: serve_once("delta_missing.zip", car),
+    };
+    let (window, game, shell) = open_with(cx, &root, Shelf { online: true }, paddock);
+    act(cx, window, |window, cx| {
+        window.click(("section", 2usize), cx)
+    });
+    settle(cx);
+    let online = cx.update(|cx| shell.read(cx).online().unwrap().clone());
+    let names = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let online = online.read(cx);
+            online
+                .matching()
+                .iter()
+                .map(|&i| online.listing().servers[i].server.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        names(cx),
+        ["Park Sprint", "Ring Cruise", "Faraway"],
+        "busiest first; the unlisted favourite is not in the lobby's list"
+    );
+
+    // Pings arrived; sorting by them puts the silent server last either way.
+    act(cx, window, |window, cx| {
+        window.click(("sort", Column::Ping as usize), cx)
+    });
+    assert_eq!(names(cx), ["Park Sprint", "Ring Cruise", "Faraway"]);
+    act(cx, window, |window, cx| {
+        window.click(("sort", Column::Ping as usize), cx)
+    });
+    assert_eq!(names(cx), ["Ring Cruise", "Park Sprint", "Faraway"]);
+    act(cx, window, |window, cx| {
+        window.click(("sort", Column::Name as usize), cx)
+    });
+    assert_eq!(names(cx), ["Faraway", "Park Sprint", "Ring Cruise"]);
+
+    // Starring Ring Cruise puts it in Favourites, beside the favourite that
+    // answered when asked directly.
+    act(cx, window, |window, cx| window.click(("star", 2usize), cx));
+    act(cx, window, |window, cx| window.click(("tab", 1usize), cx));
+    assert_eq!(names(cx), ["Garage", "Ring Cruise"]);
+    cx.update(|cx| {
+        let online = online.read(cx);
+        assert_eq!(online.saved().favourites.len(), 3);
+        let garage = online
+            .listing()
+            .servers
+            .iter()
+            .find(|l| l.server.name == "Garage")
+            .unwrap();
+        assert_eq!(garage.server.found, Found::Direct);
+    });
+    act(cx, window, |window, cx| window.click(("tab", 2usize), cx));
+    assert_eq!(names(cx), ["Park Sprint"]);
+    act(cx, window, |window, cx| window.click(("tab", 3usize), cx));
+    settle(cx);
+    assert_eq!(names(cx), ["Office LAN"]);
+
+    // Ring Cruise: the traffic van is not a car to choose, and the missing
+    // car downloads straight from the link the server gives.
+    act(cx, window, |window, cx| window.click(("tab", 0usize), cx));
+    act(cx, window, |window, cx| {
+        window.click(("server", 2usize), cx)
+    });
+    settle(cx);
+    cx.update(|cx| {
+        let online = online.read(cx);
+        assert_eq!(online.selected().unwrap().server.name, "Ring Cruise");
+        assert!(online.is_traffic("traffic_van"));
+        assert!(!online.is_traffic("delta_missing"));
+        assert_eq!(online.chosen_car(), Some("gamma_road"));
+    });
+    act(cx, window, |window, cx| window.click(("fetch", 0usize), cx));
+    settle(cx);
+    cx.update(|cx| {
+        assert!(game.read(cx).library.car("delta_missing").is_some());
+        let online = online.read(cx);
+        assert!(!online.is_fetching());
+        assert!(online.listing().car("delta_missing").unwrap().installed);
+    });
+    act(cx, window, |window, cx| window.click(("car", 1usize), cx));
+    cx.update(|cx| assert_eq!(online.read(cx).chosen_car(), Some("delta_missing")));
+
+    // Faraway's track is on a web page: a dialog takes what was downloaded.
+    act(cx, window, |window, cx| {
+        window.click(("server", 0usize), cx)
+    });
+    settle(cx);
+    act(cx, window, |window, cx| window.click(("page", 0usize), cx));
+    let dialog = cx.update(|cx| {
+        online
+            .read(cx)
+            .dialog()
+            .expect("the dialog is open")
+            .clone()
+    });
+    let unpacked = root.parent().unwrap().join("Downloads/faraway");
+    std::fs::create_dir_all(unpacked.join("ui")).unwrap();
+    std::fs::write(
+        unpacked.join("ui/ui_track.json"),
+        r#"{"name": "Faraway", "pitboxes": "8"}"#,
+    )
+    .unwrap();
+    std::fs::write(unpacked.join("faraway.kn5"), "").unwrap();
+    cx.update(|cx| dialog.update(cx, |dialog, cx| dialog.accept(unpacked.clone(), cx)));
+    settle(cx);
+    act(cx, window, |window, cx| window.click("content-done", cx));
+    cx.update(|cx| {
+        let online = online.read(cx);
+        assert!(online.dialog().is_none());
+        assert!(online.selected().unwrap().track_installed);
     });
 }

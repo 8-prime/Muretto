@@ -5,7 +5,9 @@
 //!
 //! Element ids after the path are clicked in order before the picture is
 //! taken, e.g. `change-car` to capture the car list or `section:4` for the
-//! fifth section. `drop=<file>` hands a file to the open get-a-mod dialog.
+//! fifth section. `drop=<file>` hands a file to the open get-a-mod dialog;
+//! `type=<text>` types into whatever has focus; `wait=<ms>` waits for
+//! background work.
 
 use std::{sync::Arc, time::Duration};
 
@@ -73,6 +75,21 @@ fn main() {
                 let dialog = shell.read(cx).getting().expect("a dialog is open").clone();
                 dialog.update(cx, |dialog, cx| dialog.accept(path.into(), cx));
             });
+            settle(&mut cx);
+            continue;
+        }
+        // "wait=3000" lets background work, such as pings, land.
+        if let Some(ms) = id.strip_prefix("wait=").and_then(|ms| ms.parse().ok()) {
+            let until = std::time::Instant::now() + Duration::from_millis(ms);
+            while std::time::Instant::now() < until {
+                settle(&mut cx);
+            }
+            continue;
+        }
+        // "type=text" types into whatever has focus.
+        if let Some(text) = id.strip_prefix("type=") {
+            cx.update_window(window, |_, window, cx| window.input(text, cx))
+                .expect("the text is typed");
             settle(&mut cx);
             continue;
         }

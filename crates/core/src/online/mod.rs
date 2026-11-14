@@ -6,8 +6,14 @@
 //! AssettoServer, which disagree on whether numbers are strings and flags
 //! are numbers, so every field is read leniently.
 
+pub mod offers;
+pub mod ping;
+pub mod saved;
+
 use std::{
+    cmp::Ordering,
     collections::{BTreeSet, HashMap},
+    net::SocketAddr,
     time::Duration,
 };
 
@@ -125,6 +131,18 @@ fn find_track<'a>(library: &'a Library, id: &str) -> Option<&'a crate::Track> {
         .find(|track| track.id.eq_ignore_ascii_case(id))
 }
 
+/// How Muretto came to know of a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Found {
+    #[default]
+    Lobby,
+    /// It answered a broadcast on this network.
+    Lan,
+    /// The player kept it, the lobby does not list it, and it was asked
+    /// directly.
+    Direct,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Server {
     pub ip: String,
@@ -132,6 +150,9 @@ pub struct Server {
     pub http_port: u16,
     /// Where the game connects.
     pub tcp_port: u16,
+    /// Where it answers pings.
+    pub udp_port: u16,
+    pub found: Found,
     pub name: String,
     /// AssettoServer and Content Manager's server wrapper append `ℹ<port>`
     /// to the name: the port of an extended description.
@@ -198,10 +219,13 @@ impl Server {
                     .then(|| (name.to_owned(), code.to_ascii_uppercase()))
             });
 
+        let tcp_port = port("tport").or_else(|| port("port"))?;
         Some(Server {
-            ip: text("ip")?,
+            ip: text("ip").filter(|ip| !ip.trim().is_empty())?,
             http_port: port("cport")?,
-            tcp_port: port("tport").or_else(|| port("port"))?,
+            tcp_port,
+            udp_port: port("port").unwrap_or(tcp_port),
+            found: Found::Lobby,
             name,
             details_port,
             clients: number("clients").unwrap_or(0) as u32,
@@ -235,10 +259,40 @@ impl Server {
     pub fn free_slots(&self) -> u32 {
         self.capacity.saturating_sub(self.clients)
     }
+
+    /// Where pings go.
+    pub fn ping_address(&self) -> Option<SocketAddr> {
+        format!("{}:{}", self.ip, self.udp_port).parse().ok()
+    }
 }
 
-/// Splits `"Name ℹ8081"` into the name and the port.
+/// Reads what a server says about itself at `/INFO`, which is what it tells
+/// the lobby. Servers leave out their own address, so it is taken from
+/// where they were asked.
+pub fn parse_info(text: &str, ip: &str, http_port: u16) -> Result<Server> {
+    let mut value: Value = serde_json::from_str(text)
+        .map_err(|e| Error::Network(format!("The server sent something unexpected: {e}")))?;
+    if let Some(object) = value.as_object_mut() {
+        let missing = |v: Option<&Value>| {
+            v.and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+        };
+        if missing(object.get("ip")) {
+            object.insert("ip".to_owned(), Value::from(ip));
+        }
+        object
+            .entry("cport")
+            .or_insert_with(|| Value::from(http_port));
+    }
+    Server::from_json(&value)
+        .ok_or_else(|| Error::Network("The server did not describe itself.".to_owned()))
+}
+
+/// Splits `"Name ℹ8081"` into the name and the port. Control characters,
+/// which some names carry and no font can draw, are dropped.
 fn split_name(raw: &str) -> (String, Option<u16>) {
+    let raw: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let raw = raw.as_str();
     if let Some((name, port)) = raw.rsplit_once('ℹ')
         && let Ok(port) = port.trim().parse()
     {
@@ -306,6 +360,15 @@ pub trait Source: Send + Sync {
     fn player(&self) -> Result<SteamUser>;
     fn servers(&self, player: &SteamUser) -> Result<Lobby>;
     fn slots(&self, server: &Server, player: &SteamUser) -> Result<Vec<Slot>>;
+    /// Asks a server at `ip:http_port` about itself, for kept servers the
+    /// lobby does not list.
+    fn info(&self, ip: &str, http_port: u16) -> Result<Server>;
+    /// Servers on this network.
+    fn lan(&self) -> Result<Vec<Server>>;
+    /// Pings each server and reports answers as they come.
+    fn ping(&self, targets: &[SocketAddr], answered: &mut dyn FnMut(SocketAddr, Duration));
+    /// Where the server says its content can be downloaded.
+    fn offers(&self, server: &Server) -> Result<Vec<offers::Offer>>;
 }
 
 /// The official lobby and the servers themselves.
@@ -366,6 +429,44 @@ impl Source for Official {
     fn slots(&self, server: &Server, player: &SteamUser) -> Result<Vec<Slot>> {
         fetch_slots(server, player)
     }
+
+    fn info(&self, ip: &str, http_port: u16) -> Result<Server> {
+        let text = get(
+            &format!("http://{ip}:{http_port}/INFO"),
+            LOBBY_AGENT,
+            Duration::from_secs(4),
+        )?;
+        parse_info(&text, ip, http_port)
+    }
+
+    fn lan(&self) -> Result<Vec<Server>> {
+        let found = ping::broadcast(ping::LAN_PORTS, Duration::from_millis(1500))
+            .map_err(|e| Error::Network(format!("Could not search this network: {e}")))?;
+        let asking: Vec<_> = found
+            .into_iter()
+            .map(|found| {
+                std::thread::spawn(move || {
+                    let ip = found.address.ip().to_string();
+                    let mut server = Official.info(&ip, found.http_port).ok()?;
+                    server.udp_port = found.address.port();
+                    server.found = Found::Lan;
+                    Some(server)
+                })
+            })
+            .collect();
+        Ok(asking
+            .into_iter()
+            .filter_map(|asking| asking.join().ok().flatten())
+            .collect())
+    }
+
+    fn ping(&self, targets: &[SocketAddr], answered: &mut dyn FnMut(SocketAddr, Duration)) {
+        let _ = ping::ping(targets, Duration::from_secs(2), answered);
+    }
+
+    fn offers(&self, server: &Server) -> Result<Vec<offers::Offer>> {
+        offers::fetch_offers(server)
+    }
 }
 
 /// A car on a server and who, if anyone, drives it.
@@ -377,6 +478,8 @@ pub struct Slot {
     pub connected: bool,
     /// Booked for the player asking.
     pub yours: bool,
+    /// Driven by the server: AI traffic, which players cannot take.
+    pub ai: bool,
 }
 
 /// The server's cars, slot by slot.
@@ -405,12 +508,14 @@ pub fn parse_slots(text: &str) -> Result<Vec<Slot>> {
                     .map(str::to_owned),
                 connected: flag("IsConnected"),
                 yours: flag("IsRequestedGUID"),
+                // AssettoServer leaves its traffic out of the entry list.
+                ai: slot.get("IsEntryList").is_some_and(|v| !lenient_flag(v)),
             })
         })
         .collect())
 }
 
-fn get(url: &str, agent_name: &str, timeout: Duration) -> Result<String> {
+pub(crate) fn get(url: &str, agent_name: &str, timeout: Duration) -> Result<String> {
     let failed = |e: ureq::Error| Error::Network(format!("{url} could not be read: {e}"));
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .user_agent(agent_name)
@@ -482,10 +587,23 @@ impl Facet {
     }
 }
 
+/// Which servers a tab of the Online section is about.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Scope {
+    /// What the lobby lists.
+    #[default]
+    Lobby,
+    /// What answered on this network.
+    Lan,
+    /// The servers at these addresses, wherever they were found.
+    Kept(BTreeSet<String>),
+}
+
 /// What the player narrowed the list to. Values chosen within a facet are
 /// alternatives; facets, switches and the search all have to hold.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Filter {
+    pub scope: Scope,
     pub text: String,
     pub free_slots: bool,
     pub not_empty: bool,
@@ -535,15 +653,25 @@ impl Filter {
         }
     }
 
+    /// Whether nothing narrows the list beyond the tab it is in.
     pub fn is_empty(&self) -> bool {
-        *self == Self::default()
+        Filter {
+            scope: Scope::default(),
+            ..self.clone()
+        } == Self::default()
     }
 
     /// Whether `listed` passes, leaving out the facet named in `except`.
     fn passes(&self, listed: &Listed, words: &[String], except: Option<Facet>) -> bool {
         let server = &listed.server;
         let facet = |facet| except != Some(facet);
-        (!self.free_slots || server.free_slots() > 0)
+        let in_scope = match &self.scope {
+            Scope::Lobby => server.found == Found::Lobby,
+            Scope::Lan => server.found == Found::Lan,
+            Scope::Kept(addresses) => addresses.contains(&server.address()),
+        };
+        in_scope
+            && (!self.free_slots || server.free_slots() > 0)
             && (!self.not_empty || server.clients > 0)
             && (!self.no_password || !server.password)
             && (!self.installed || listed.joinable())
@@ -696,8 +824,9 @@ impl Listing {
         self.tracks.get(id).map_or(id, |track| track.name.as_str())
     }
 
-    /// Indices of the servers that pass, busiest first.
-    pub fn matching(&self, filter: &Filter) -> Vec<usize> {
+    /// Indices of the servers that pass, in `order`. `pings` holds each
+    /// server's ping in milliseconds, by index, once it has answered.
+    pub fn matching(&self, filter: &Filter, order: Order, pings: &[Option<u32>]) -> Vec<usize> {
         let words = filter.words();
         let mut found: Vec<usize> = self
             .servers
@@ -706,11 +835,39 @@ impl Listing {
             .filter(|(_, listed)| filter.passes(listed, &words, None))
             .map(|(index, _)| index)
             .collect();
+        let ping = |index: usize| pings.get(index).copied().flatten();
+        // Names are compared often; lower-case each once.
+        let names: HashMap<usize, String> = found
+            .iter()
+            .map(|&index| (index, self.servers[index].server.name.to_lowercase()))
+            .collect();
         found.sort_by(|&a, &b| {
-            let (a, b) = (&self.servers[a].server, &self.servers[b].server);
-            b.clients
-                .cmp(&a.clients)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            let (la, lb) = (&self.servers[a], &self.servers[b]);
+            let (sa, sb) = (&la.server, &lb.server);
+            let busiest = || {
+                sb.clients
+                    .cmp(&sa.clients)
+                    .then_with(|| names[&a].cmp(&names[&b]))
+            };
+            let by = match order.column {
+                Column::Name => names[&a].cmp(&names[&b]),
+                Column::Track => self
+                    .track_name(&la.track_id)
+                    .to_lowercase()
+                    .cmp(&self.track_name(&lb.track_id).to_lowercase()),
+                Column::Cars => sa.cars.len().cmp(&sb.cars.len()),
+                Column::Session => sa.current.cmp(&sb.current),
+                Column::Drivers => sa.clients.cmp(&sb.clients),
+                Column::Ping => match (ping(a), ping(b)) {
+                    (Some(pa), Some(pb)) => pa.cmp(&pb),
+                    // Servers yet to answer go last whichever way round.
+                    (Some(_), None) => return Ordering::Less,
+                    (None, Some(_)) => return Ordering::Greater,
+                    (None, None) => return busiest(),
+                },
+            };
+            let by = if order.descending { by.reverse() } else { by };
+            by.then_with(busiest)
         });
         found
     }
@@ -813,6 +970,65 @@ impl Listing {
     }
 }
 
+/// A column the server list can be sorted by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Column {
+    Name,
+    Track,
+    Cars,
+    Session,
+    Drivers,
+    Ping,
+}
+
+impl Column {
+    /// Counts read best largest first; names, sessions and pings smallest.
+    fn starts_descending(self) -> bool {
+        matches!(self, Column::Cars | Column::Drivers)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Order {
+    pub column: Column,
+    pub descending: bool,
+}
+
+impl Default for Order {
+    /// Busiest first.
+    fn default() -> Self {
+        Order {
+            column: Column::Drivers,
+            descending: true,
+        }
+    }
+}
+
+impl Order {
+    /// The order after clicking `column`'s heading: the other way round if
+    /// it is already sorted by it, else by it in its natural direction.
+    pub fn by(self, column: Column) -> Self {
+        if self.column == column {
+            Order {
+                column,
+                descending: !self.descending,
+            }
+        } else {
+            Order {
+                column,
+                descending: column.starts_descending(),
+            }
+        }
+    }
+}
+
+/// Whether a car is, by its folder name, AI traffic. Servers list traffic
+/// models among their cars; their slots say for sure, this guesses before
+/// they have answered.
+pub fn looks_like_traffic(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("traffic")
+}
+
 /// `ks_nordschleife` → `Nordschleife`; for content the player does not have
 /// and so has no proper name for.
 pub fn readable(id: &str) -> String {
@@ -903,7 +1119,7 @@ mod tests {
     /// one too broken to list.
     const LOBBY_EXCERPT: &str = r#"[
       {"ip":"94.23.107.62","port":9095,"cport":8085,"tport":9095,
-       "name":"MKBT5 - Barcelona Practice ℹ8085","clients":3,"maxclients":24,
+       "name":"MKBT5 - Barcelona\u0004 Practice ℹ8085","clients":3,"maxclients":24,
        "track":"fn_barcelona-barcelona_2023","cars":["mkbt_f3","ks_mazda_mx5_cup"],
        "session":1,"sessiontypes":["1"],"durations":["120"],"timeleft":786,
        "country":["Germany","DE"],"pass":false},
@@ -1013,7 +1229,7 @@ mod tests {
         let listing = Listing::new(parse_lobby(LOBBY_EXCERPT).unwrap(), &library);
         let names = |filter: &Filter| {
             listing
-                .matching(filter)
+                .matching(filter, Order::default(), &[])
                 .into_iter()
                 .map(|i| listing.servers[i].server.name.as_str())
                 .collect::<Vec<_>>()
@@ -1132,6 +1348,125 @@ mod tests {
         assert_eq!(get("REMOTE", "GUID"), player.id);
         assert_eq!(get("REMOTE", "NAME"), "L. Brandt");
         assert_eq!(get("CAR_0", "DRIVER_NAME"), "L. Brandt");
+    }
+
+    #[test]
+    fn columns_sort_both_ways_and_unanswered_pings_go_last() {
+        let library = library();
+        let listing = Listing::new(parse_lobby(LOBBY_EXCERPT).unwrap(), &library);
+        let names = |order: Order, pings: &[Option<u32>]| {
+            listing
+                .matching(&Filter::default(), order, pings)
+                .into_iter()
+                .map(|i| listing.servers[i].server.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        let by_name = Order::default().by(Column::Name);
+        assert!(!by_name.descending);
+        assert_eq!(
+            names(by_name, &[]),
+            [
+                "MKBT5 - Barcelona Practice",
+                "Moov Town Drift",
+                "Shutoko night"
+            ]
+        );
+        assert_eq!(
+            names(by_name.by(Column::Name), &[])[0],
+            "Shutoko night",
+            "a second click turns it round"
+        );
+        let by_ping = Order::default().by(Column::Ping);
+        let pings = [Some(80), None, Some(20)];
+        assert_eq!(
+            names(by_ping, &pings),
+            [
+                "Shutoko night",
+                "MKBT5 - Barcelona Practice",
+                "Moov Town Drift"
+            ]
+        );
+        assert_eq!(
+            names(by_ping.by(Column::Ping), &pings),
+            [
+                "MKBT5 - Barcelona Practice",
+                "Shutoko night",
+                "Moov Town Drift"
+            ]
+        );
+        assert_eq!(
+            names(Order::default().by(Column::Cars), &[])[0],
+            "MKBT5 - Barcelona Practice"
+        );
+    }
+
+    #[test]
+    fn tabs_show_the_lobby_the_network_or_kept_servers() {
+        let library = library();
+        let mut servers = parse_lobby(LOBBY_EXCERPT).unwrap();
+        servers[1].found = Found::Lan;
+        servers[2].found = Found::Direct;
+        let listing = Listing::new(servers, &library);
+        let names = |scope: Scope| {
+            let filter = Filter {
+                scope,
+                ..Filter::default()
+            };
+            assert!(filter.is_empty(), "a tab is not a filter");
+            listing
+                .matching(&filter, Order::default(), &[])
+                .into_iter()
+                .map(|i| listing.servers[i].server.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Scope::Lobby), ["MKBT5 - Barcelona Practice"]);
+        assert_eq!(names(Scope::Lan), ["Moov Town Drift"]);
+        assert_eq!(
+            names(Scope::Kept(
+                [
+                    "148.251.69.57:8085".to_owned(),
+                    "94.23.107.62:8085".to_owned()
+                ]
+                .into()
+            )),
+            ["Shutoko night", "MKBT5 - Barcelona Practice"]
+        );
+    }
+
+    #[test]
+    fn a_server_asked_directly_describes_itself_like_in_the_lobby() {
+        let server = parse_info(
+            r#"{"ip":"","port":9600,"tport":9600,"cport":8081,"name":"Garage ℹ8082","clients":1,
+                "maxclients":8,"track":"park","cars":["ks_mazda_mx5_cup"],"session":1,"sessiontypes":[1]}"#,
+            "192.168.1.20",
+            8081,
+        )
+        .unwrap();
+        assert_eq!(server.ip, "192.168.1.20");
+        assert_eq!(server.address(), "192.168.1.20:8081");
+        assert_eq!(server.details_port, Some(8082));
+        assert_eq!(
+            server.ping_address(),
+            Some("192.168.1.20:9600".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn traffic_slots_are_told_from_the_entry_list() {
+        let slots = parse_slots(
+            r#"{"Cars":[
+              {"Model":"traffic_volvo_v70","Skin":"a","IsEntryList":false,"IsConnected":false},
+              {"Model":"hk51_ef9","Skin":"b","IsEntryList":true,"IsConnected":false},
+              {"Model":"ks_mazda_mx5_cup","Skin":"c"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            slots.iter().map(|s| s.ai).collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        assert!(looks_like_traffic("nohesi_traffic_bmw_x5"));
+        assert!(!looks_like_traffic("ks_mazda_mx5_cup"));
     }
 
     #[test]

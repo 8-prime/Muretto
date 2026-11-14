@@ -2,12 +2,18 @@
 //! middle, and the next session with its launch button along the bottom.
 
 use gpui_kit::{
-    AnyElement, Context, Div, Entity, FontWeight, IntoElement, Render, SharedString, Subscription,
-    TestSupportExt as _, Window, div, prelude::*, px, rgb,
+    AnyElement, Context, Div, Entity, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
+    IntoElement, Render, SharedString, Subscription, TestSupportExt as _, Window, div, prelude::*,
+    px, rgb,
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use muretto_core::{Install, Library, online, packages::csp, session::format_time};
+use muretto_core::{
+    Install, Library,
+    online::{self, saved::Saved},
+    packages::csp,
+    session::format_time,
+};
 
 use crate::{
     APP_NAME,
@@ -15,7 +21,7 @@ use crate::{
     screens::{
         drive::{DriveEvent, DriveScreen},
         get_mod::{GetDialog, GetEvent},
-        online::OnlineScreen,
+        online::{OnlineScreen, Tab},
         picker::{Picker, PickerEvent, PickerItem},
         settings::{SettingsEvent, SettingsScreen},
     },
@@ -46,6 +52,7 @@ const SECTIONS: [(&str, &[&str]); 5] = [
             "Fonts",
         ],
     ),
+    // In the order of `online::Tab::ALL`.
     ("Online", &["All servers", "Favourites", "Recent", "LAN"]),
     (
         "Results",
@@ -71,11 +78,14 @@ enum Stage {
     },
 }
 
-/// Where the screens get what they fetch from the internet.
+/// Where the screens get what they fetch from the internet, and where
+/// Muretto keeps what the player chose.
 #[derive(Clone)]
 pub struct Sources {
     pub patches: Arc<dyn csp::Source>,
     pub servers: Arc<dyn online::Source>,
+    /// Favourite and recent servers; kept nowhere when `None`.
+    pub saved_servers: Option<PathBuf>,
 }
 
 impl Sources {
@@ -83,9 +93,34 @@ impl Sources {
         Self {
             patches: Arc::new(csp::Official),
             servers: Arc::new(online::Official),
+            saved_servers: Saved::default_path(),
         }
     }
 }
+
+/// Faces to draw what the bundled fonts lack: emoji and the scripts server
+/// names come in. Whichever of them the system has are used, in order.
+const FALLBACK_FONTS: &[&str] = &[
+    "Noto Color Emoji",
+    "Segoe UI Emoji",
+    "Apple Color Emoji",
+    "Twemoji",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK KR",
+    "Microsoft YaHei",
+    "Yu Gothic",
+    "Malgun Gothic",
+    "PingFang SC",
+    "Hiragino Sans",
+    "Noto Sans",
+    "Noto Sans Arabic",
+    "Noto Sans Thai",
+    "Segoe UI",
+    "Segoe UI Symbol",
+    "DejaVu Sans",
+    "Arial Unicode MS",
+];
 
 #[derive(Clone, Copy)]
 enum Choosing {
@@ -172,9 +207,9 @@ impl Shell {
         self.picker.is_some()
     }
 
-    /// Whether Online › All servers is showing.
+    /// Whether one of the Online section's server lists is showing.
     fn on_servers(&self) -> bool {
-        self.section == ONLINE && self.tabs[ONLINE] == 0
+        self.section == ONLINE
     }
 
     fn loading() -> Self {
@@ -205,7 +240,9 @@ impl Shell {
         let game = cx.new(|_| game);
         let drive = cx.new(|cx| DriveScreen::new(game.clone(), window, cx));
         let settings = cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, cx));
-        let online = cx.new(|cx| OnlineScreen::new(game.clone(), sources.servers, window, cx));
+        let saved = Saved::load(sources.saved_servers);
+        let online =
+            cx.new(|cx| OnlineScreen::new(game.clone(), sources.servers, saved, window, cx));
         self._subscriptions = vec![
             cx.observe(&game, |_, _, cx| cx.notify()),
             // The bottom bar shows the chosen server.
@@ -417,9 +454,11 @@ impl Shell {
         if tabs.is_empty() {
             return None;
         }
-        let library = match &self.stage {
-            Stage::Ready { game, .. } => Some(game.read(cx).library.clone()),
-            _ => None,
+        let (library, online) = match &self.stage {
+            Stage::Ready { game, online, .. } => {
+                (Some(game.read(cx).library.clone()), Some(online.read(cx)))
+            }
+            _ => (None, None),
         };
         let section = self.section;
         Some(
@@ -435,16 +474,17 @@ impl Shell {
                 .children(tabs.iter().enumerate().map(|(index, name)| {
                     let active = index == self.tabs[section];
                     // Tabs over installed content show how much there is.
-                    let count =
-                        library
-                            .as_ref()
-                            .filter(|_| section == CONTENT)
-                            .and_then(|library| match *name {
-                                "Cars" => Some(library.cars.len()),
-                                "Tracks" => Some(library.tracks.len()),
-                                "Weather" => Some(library.weather.len()),
-                                _ => None,
-                            });
+                    let count = match section {
+                        CONTENT => library.as_ref().and_then(|library| match *name {
+                            "Cars" => Some(library.cars.len()),
+                            "Tracks" => Some(library.tracks.len()),
+                            "Weather" => Some(library.weather.len()),
+                            _ => None,
+                        }),
+                        // So are the servers in each list.
+                        ONLINE => online.and_then(|online| online.count(Tab::ALL[index])),
+                        _ => None,
+                    };
                     let text = match count {
                         Some(count) => format!("{name} · {count}"),
                         None => (*name).to_owned(),
@@ -460,6 +500,11 @@ impl Shell {
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.tabs[section] = index;
+                            if section == ONLINE
+                                && let Some(online) = this.online()
+                            {
+                                online.update(cx, |online, cx| online.set_tab(Tab::ALL[index], cx));
+                            }
                             cx.notify();
                         }))
                         .child(
@@ -483,6 +528,7 @@ impl Shell {
                                     .bg(rgb(color::ACCENT_TEXT)),
                             )
                         })
+                        .test_support()
                 })),
         )
     }
@@ -663,7 +709,18 @@ impl Render for Shell {
             .size_full()
             .bg(rgb(color::BG))
             .text_color(rgb(color::TEXT))
-            .font_family(font::BODY)
+            .font(Font {
+                family: font::BODY.into(),
+                features: FontFeatures::default(),
+                fallbacks: Some(FontFallbacks::from_fonts(
+                    FALLBACK_FONTS
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect(),
+                )),
+                weight: FontWeight::NORMAL,
+                style: FontStyle::Normal,
+            })
             .text_size(px(13.))
             .child(self.top_bar(cx))
             .children(self.tab_bar(cx))

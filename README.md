@@ -29,7 +29,11 @@ offscreen to a PNG. Element ids after the path are clicked first:
 ```sh
 cargo run -p muretto --features shot --bin shot -- drive.png
 cargo run -p muretto --features shot --bin shot -- cars.png change-car
+cargo run -p muretto --features shot --bin shot -- online.png section:2 wait=4000 input-state "type=drift" server:0
 ```
+
+`wait=<ms>` lets background work such as pings land; `type=<text>` types
+into whatever has focus.
 
 ## What Muretto writes into the game folder
 
@@ -45,6 +49,15 @@ Mods Muretto cannot download itself are described by a recipe in
 recognise its archive, and what using it means. Getting one opens its page in
 the browser and a dialog in Muretto that takes the downloaded zip by drop or
 file choice. Add a mod by adding a recipe.
+
+Cars and tracks a server needs are installed from the link the server
+gives: straight away when it points at a zip or 7z, through the same
+drop-or-choose dialog when it points at a page (Google Drive, Mega,
+MediaFire). Every car and track found in the archive or folder goes into
+`content/`, each with a receipt; content already there is left alone.
+
+Favourite and recently joined servers are kept outside the game folder, in
+`servers.json` in Muretto's settings folder (`~/.config/muretto` on Linux).
 
 To try an install against the real download without touching the game:
 
