@@ -2,6 +2,7 @@
 //! where the game lives, what content is installed, and how to start a session.
 
 pub mod content;
+pub mod country;
 pub mod ini;
 pub mod install;
 pub mod launch;

@@ -12,15 +12,17 @@ use std::{
 };
 
 use gpui_kit::{
-    AnyElement, App, Context, Div, Entity, FontWeight, IntoElement, Render, SharedString, Stateful,
-    Subscription, TestSupportExt as _, Window,
+    AnyElement, App, Context, Div, Entity, FontWeight, IntoElement, ObjectFit, Render,
+    SharedString, Stateful, Subscription, TestSupportExt as _, Window,
     component::input::{Input, InputEvent, InputState},
-    div,
+    div, img, pattern_slash,
     prelude::*,
     px, relative, rgb, svg, uniform_list,
 };
 use muretto_core::{
-    Error, Library, launch,
+    Car, Error, Library, Skin,
+    country::Flags,
+    launch,
     online::{
         self, Column, Facet, Filter, Found, Join, Listed, Listing, Order, Scope, Server,
         SessionKind, Slot, looks_like_traffic,
@@ -38,8 +40,8 @@ use crate::{
         facet_picker::{FacetEvent, FacetPicker},
         get_content::{ContentDialog, ContentEvent, added_text},
     },
-    theme::{PAGE, RADIUS, color, font},
-    ui::{badge, button, label, launch_button, mono, muted},
+    theme::{PAGE, RADIUS, color, font, hsla},
+    ui::{badge, button, label, launch_button, mono, muted, stat_strip},
 };
 
 /// The tabs of the Online section, in order.
@@ -135,6 +137,8 @@ pub struct OnlineScreen {
     /// The selected server's slots, as it last reported them.
     slots: Option<Slots>,
     car: Option<String>,
+    /// The car on the selected server whose picture and figures are open.
+    car_info: Option<String>,
     /// Where the selected server says its content can be downloaded.
     offers: Option<Offers>,
     /// Content being downloaded for the selected server.
@@ -143,6 +147,8 @@ pub struct OnlineScreen {
     fetched: Option<(SharedString, bool)>,
     show_traffic: bool,
     launch: Launch,
+    /// The game's flag pictures, for the servers' countries.
+    flags: Flags,
     search: Entity<InputState>,
     password: Entity<InputState>,
     picker: Option<(Entity<FacetPicker>, Subscription)>,
@@ -191,6 +197,7 @@ impl OnlineScreen {
             }),
         ];
         let listed_library = game.read(cx).library.clone();
+        let flags = Flags::scan(&game.read(cx).install);
         Self {
             game,
             source,
@@ -213,11 +220,13 @@ impl OnlineScreen {
             selected: None,
             slots: None,
             car: None,
+            car_info: None,
             offers: None,
             fetching: None,
             fetched: None,
             show_traffic: false,
             launch: Launch::Idle,
+            flags,
             search,
             password,
             picker: None,
@@ -627,6 +636,7 @@ impl OnlineScreen {
         self.offers = None;
         self.fetched = None;
         self.show_traffic = false;
+        self.car_info = None;
         self.launch = Launch::Idle;
         self.car = self.default_car();
         cx.notify();
@@ -790,6 +800,33 @@ impl OnlineScreen {
         looks_like_traffic(car)
     }
 
+    /// The car whose picture and figures are open in the car list.
+    pub fn car_info(&self) -> Option<&str> {
+        self.car_info.as_deref()
+    }
+
+    /// Opens a car's picture and figures in the list, or closes them.
+    pub fn toggle_car_info(&mut self, car: &str, cx: &mut Context<Self>) {
+        self.car_info = match self.car_info.take() {
+            Some(open) if open == car => None,
+            _ => Some(car.to_owned()),
+        };
+        cx.notify();
+    }
+
+    /// The skin the server hands out with a free slot of `car`, if this
+    /// copy of the car has it, else the car's first.
+    fn offered_skin<'a>(&self, car: &'a Car) -> Option<&'a Skin> {
+        let offered = match &self.slots {
+            Some(Slots::Loaded(slots)) => slots
+                .iter()
+                .find(|slot| slot.car == car.id && !slot.connected)
+                .and_then(|slot| car.skin(&slot.skin)),
+            _ => None,
+        };
+        offered.or(car.skins.first())
+    }
+
     pub fn choose_car(&mut self, car: &str, cx: &mut Context<Self>) {
         if self.installed(car) && !self.is_traffic(car) {
             self.car = Some(car.to_owned());
@@ -867,23 +904,12 @@ impl OnlineScreen {
             return;
         };
         let game = self.game.read(cx);
-        // The server hands out a skin with the slot; ask for the one it
-        // offers if this copy of the car has it.
-        let installed = game.library.car(car);
-        let offered = match &self.slots {
-            Some(Slots::Loaded(slots)) => slots
-                .iter()
-                .find(|slot| slot.car == car && !slot.connected)
-                .map(|slot| slot.skin.clone()),
-            _ => None,
-        };
-        let skin = offered
-            .filter(|skin| installed.is_some_and(|c| c.skin(skin).is_some()))
-            .or_else(|| {
-                installed
-                    .and_then(|c| c.skins.first())
-                    .map(|s| s.id.clone())
-            })
+        // The server hands out a skin with the slot; ask for that one.
+        let skin = game
+            .library
+            .car(car)
+            .and_then(|car| self.offered_skin(car))
+            .map(|skin| skin.id.clone())
             .unwrap_or_default();
         let password = self.password.read(cx).value().to_string();
         let join = Join {
@@ -1233,6 +1259,7 @@ impl OnlineScreen {
         if let Some((country, _)) = &server.country {
             about.push(country.clone());
         }
+        let flag = self.flag(server);
         if server.track.patch_build.is_some() {
             about.push("CSP required".to_owned());
         }
@@ -1254,9 +1281,18 @@ impl OnlineScreen {
             .cursor_pointer()
             .map(|row| {
                 if selected {
-                    row.bg(rgb(color::ACCENT_WASH))
-                        .border_l_2()
-                        .border_color(rgb(color::ACCENT))
+                    // A border takes one colour on every side, so the accent
+                    // is its own bar; the divider below stays the same as
+                    // every other row's.
+                    row.relative().bg(rgb(color::ACCENT_WASH)).child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(2.))
+                            .bg(rgb(color::ACCENT)),
+                    )
                 } else {
                     row.hover(|style| style.bg(rgb(color::RAISED)))
                 }
@@ -1325,10 +1361,12 @@ impl OnlineScreen {
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap(px(6.))
                             .text_size(px(12.))
                             .text_color(rgb(color::TEXT_MUTED))
                             .truncate()
+                            .children(flag.map(|flag| flag_image(flag, 16.)))
                             .child(about.join(" · "))
                             .when_some(missing, |line, missing| {
                                 line.child(
@@ -1470,7 +1508,14 @@ impl OnlineScreen {
                                     .test_support(),
                             ),
                     )
-                    .child(muted(about.join(" · "))),
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(8.))
+                            .children(self.flag(server).map(|flag| flag_image(flag, 18.)))
+                            .child(muted(about.join(" · "))),
+                    ),
             )
             .when(!server.sessions.is_empty(), |panel| {
                 panel.child(
@@ -1567,8 +1612,11 @@ impl OnlineScreen {
             Some(free) => format!("Your car · {free} of {slots_total} slots free"),
             None => format!("Your car · {} to choose from", cars.len()),
         };
+        let library = self.game.read(cx).library.clone();
         let rows = cars.into_iter().enumerate().map(|(index, car)| {
             let installed = self.installed(car);
+            let known = library.car(car);
+            let info_open = known.is_some() && self.car_info.as_deref() == Some(car.as_str());
             let chosen = self.car.as_deref() == Some(car.as_str());
             let free = self.free(car);
             let state = match (installed, free) {
@@ -1580,16 +1628,14 @@ impl OnlineScreen {
             let only = self.filter.cars.len() == 1 && self.filter.cars.contains(car);
             let id = car.clone();
             let filter_id = car.clone();
-            div()
+            let info_id = car.clone();
+            let header = div()
                 .id(("car", index))
                 .flex()
                 .items_center()
                 .gap(px(10.))
                 .h(px(40.))
                 .px(px(12.))
-                .border_1()
-                .rounded(RADIUS)
-                .border_color(rgb(if chosen { color::ACCENT } else { color::BORDER }))
                 .when(chosen, |row| row.bg(rgb(color::ACCENT_WASH)))
                 .when(installed, |row| {
                     row.cursor_pointer()
@@ -1630,7 +1676,46 @@ impl OnlineScreen {
                             .test_support(),
                     )
                 })
-                .test_support()
+                .when(known.is_some(), |row| {
+                    row.child(
+                        div()
+                            .id(("car-info", index))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.))
+                            .mr(px(-6.))
+                            .rounded(RADIUS)
+                            .cursor_pointer()
+                            .when(info_open, |button| button.bg(rgb(color::CHIP)))
+                            .hover(|style| style.bg(rgb(color::CHIP)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_car_info(&info_id, cx);
+                            }))
+                            .child(svg().path("icons/info.svg").size(px(14.)).text_color(rgb(
+                                if info_open {
+                                    color::TEXT
+                                } else {
+                                    color::TEXT_MUTED
+                                },
+                            )))
+                            .test_support(),
+                    )
+                })
+                .test_support();
+            div()
+                .flex()
+                .flex_col()
+                .border_1()
+                .rounded(RADIUS)
+                .overflow_hidden()
+                .border_color(rgb(if chosen { color::ACCENT } else { color::BORDER }))
+                .child(header)
+                .when_some(known.filter(|_| info_open), |column, known| {
+                    column.child(self.car_details(known))
+                })
         });
 
         let traffic_missing = traffic.iter().filter(|car| !self.installed(car)).count();
@@ -1720,6 +1805,90 @@ impl OnlineScreen {
             .child(label(&heading))
             .children(rows)
             .children(traffic_group)
+    }
+
+    /// A car's picture in the livery the server hands out, its figures and
+    /// what its makers say about it, opened under its row in the car list.
+    fn car_details(&self, car: &Car) -> Div {
+        let skin = self.offered_skin(car);
+        let specs = &car.specs;
+        let figure = |value: Option<f64>, unit: &str| -> SharedString {
+            value.map_or("—".into(), |v| format!("{v:.0} {unit}").into())
+        };
+        let meta: Vec<String> = [
+            Some(car.brand.clone()),
+            car.year.map(|y| y.to_string()),
+            car.country.clone(),
+            Some(car.class_label()),
+            car.drivetrain().map(str::to_owned),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect();
+        let description = car.plain_description();
+        // The first paragraph says what the car is; the rest is history.
+        let description = description.lines().next().unwrap_or_default().to_owned();
+
+        div()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(rgb(color::BORDER))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(200.))
+                    .overflow_hidden()
+                    .bg(pattern_slash(hsla(color::RAISED), 10., 10.))
+                    .when_some(skin.and_then(|s| s.preview.clone()), |strip, preview| {
+                        strip.child(
+                            img(preview)
+                                .absolute()
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .p(px(12.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(muted(meta.join(" · ")))
+                            .when_some(skin, |column, skin| {
+                                column.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(color::TEXT_DIM))
+                                        .child(format!("Livery · {}", skin.label())),
+                                )
+                            }),
+                    )
+                    .child(stat_strip([
+                        ("Power", figure(specs.power_bhp, "bhp")),
+                        ("Torque", figure(specs.torque_nm, "Nm")),
+                        ("Weight", figure(specs.weight_kg, "kg")),
+                        ("Top speed", figure(specs.top_speed_kmh, "km/h")),
+                    ]))
+                    .when(!description.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .text_size(px(12.5))
+                                .line_height(relative(1.45))
+                                .text_color(rgb(color::TEXT_MUTED))
+                                .line_clamp(4)
+                                .child(description),
+                        )
+                    }),
+            )
     }
 
     /// What the server needs that the player lacks, and where to get it.
@@ -2068,6 +2237,12 @@ impl Render for OnlineScreen {
 
 impl OnlineScreen {
     /// What the list says when nothing is in it.
+    /// The game's flag for the server's country, if it has one.
+    fn flag(&self, server: &Server) -> Option<std::path::PathBuf> {
+        let (_, code) = server.country.as_ref()?;
+        self.flags.for_code(code)
+    }
+
     fn empty_text(&self) -> &'static str {
         if !self.filter.is_empty() {
             return "No server matches. Loosen the filter to see more.";
@@ -2100,6 +2275,14 @@ impl OnlineScreen {
             .collect();
         (!names.is_empty()).then(|| format!("Not answering: {}.", names.join(", ")))
     }
+}
+
+/// One of the game's flag pictures: the flag sits inside a square canvas.
+fn flag_image(path: std::path::PathBuf, size: f32) -> impl IntoElement {
+    img(path)
+        .flex_none()
+        .size(px(size))
+        .object_fit(ObjectFit::Contain)
 }
 
 fn note(text: SharedString) -> Div {

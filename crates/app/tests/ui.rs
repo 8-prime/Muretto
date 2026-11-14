@@ -860,7 +860,22 @@ fn servers_are_sorted_starred_found_on_the_network_and_completed(cx: &mut TestAp
         assert!(online.is_traffic("traffic_van"));
         assert!(!online.is_traffic("delta_missing"));
         assert_eq!(online.chosen_car(), Some("gamma_road"));
+        assert_eq!(online.car_info(), None, "car details start closed");
     });
+    // The info button opens the car's details under its row without
+    // choosing it, and closes them again.
+    act(cx, window, |window, cx| {
+        window.click(("car-info", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let online = online.read(cx);
+        assert_eq!(online.car_info(), Some("gamma_road"));
+        assert_eq!(online.chosen_car(), Some("gamma_road"));
+    });
+    act(cx, window, |window, cx| {
+        window.click(("car-info", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(online.read(cx).car_info(), None));
     act(cx, window, |window, cx| window.click(("fetch", 0usize), cx));
     settle(cx);
     cx.update(|cx| {

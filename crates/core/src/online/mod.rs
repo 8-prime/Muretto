@@ -212,10 +212,18 @@ impl Server {
         let country = value
             .get("country")
             .and_then(Value::as_array)
-            .and_then(|pair| {
-                let name = pair.first()?.as_str()?.trim();
-                let code = pair.get(1)?.as_str()?.trim();
-                (!code.is_empty() && code != "na")
+            .and_then(|parts| {
+                // The code comes last. Names with a comma arrive split
+                // ("Korea", " Republic of", "KR"), so the rest is the name.
+                let (code, name) = parts.split_last()?;
+                let code = code.as_str()?.trim();
+                let name = name
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let name = name.trim();
+                (!code.is_empty() && !name.is_empty() && code != "na")
                     .then(|| (name.to_owned(), code.to_ascii_uppercase()))
             });
 
@@ -1132,7 +1140,7 @@ mod tests {
        "name":"Shutoko night","clients":43,"maxclients":43,
        "track":"csp/2651/../e/../park-short","cars":["ks_mazda_mx5_cup"],
        "session":3,"sessiontypes":["1","2","3"],"durations":["145","60","12"],"timeleft":0,
-       "country":["Germany","DE"],"pass":false},
+       "country":["Korea"," Republic of","KR"],"pass":false},
       {"name":"no address"}
     ]"#;
 
@@ -1205,6 +1213,11 @@ mod tests {
         assert_eq!(full.track.prefix, "csp/2651/../e/../");
         assert_eq!(full.current, Some(SessionKind::Race));
         assert_eq!(full.free_slots(), 0);
+        assert_eq!(
+            full.country,
+            Some(("Korea, Republic of".to_owned(), "KR".to_owned())),
+            "a name with a comma arrives split"
+        );
     }
 
     #[test]

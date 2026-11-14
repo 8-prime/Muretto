@@ -262,6 +262,12 @@ impl Car {
             .unwrap_or_else(|| capitalize(&self.class))
     }
 
+    /// The description as plain text: the line breaks and entities the
+    /// game's own files carry become spaces and characters.
+    pub fn plain_description(&self) -> String {
+        plain_text(&self.description)
+    }
+
     /// "RWD", "AWD" or "FWD" when the tags say so.
     pub fn drivetrain(&self) -> Option<&'static str> {
         self.tags
@@ -658,9 +664,71 @@ const KUNOS_TRACKS: &[&str] = &[
     "trento-bondone",
 ];
 
+/// Markup in `ui_*.json` texts made plain: tags become line breaks or go,
+/// entities become characters, and runs of blank space collapse.
+pub fn plain_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(['<', '&']) {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        if rest.starts_with('<') {
+            let Some(end) = rest.find('>') else { break };
+            let tag = rest[1..end].trim().to_ascii_lowercase();
+            if matches!(tag.trim_end_matches('/').trim(), "br" | "p" | "/p" | "/br") {
+                out.push('\n');
+            }
+            rest = &rest[end + 1..];
+        } else {
+            let entity = rest
+                .find(';')
+                .filter(|&end| end <= 8)
+                .map(|end| &rest[..=end]);
+            let replacement = match entity {
+                Some("&quot;") => "\"",
+                Some("&amp;") => "&",
+                Some("&apos;" | "&#39;") => "'",
+                Some("&lt;") => "<",
+                Some("&gt;") => ">",
+                Some("&nbsp;") => " ",
+                Some("&ldquo;" | "&rdquo;") => "\"",
+                Some("&lsquo;" | "&rsquo;") => "'",
+                _ => {
+                    out.push('&');
+                    rest = &rest[1..];
+                    continue;
+                }
+            };
+            out.push_str(replacement);
+            rest = &rest[entity.map_or(1, str::len)..];
+        }
+    }
+    out.push_str(rest);
+    // One blank line at most between paragraphs, no stray spaces.
+    let mut paragraphs: Vec<String> = Vec::new();
+    for line in out.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !line.is_empty() {
+            paragraphs.push(line);
+        }
+    }
+    paragraphs.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn descriptions_lose_their_markup() {
+        assert_eq!(
+            plain_text(
+                "The &quot;458&quot;  is fast.<br><br/></br>Tom &amp; Jerry & co <b>bold</b>"
+            ),
+            "The \"458\" is fast.\nTom & Jerry & co bold"
+        );
+        assert_eq!(plain_text("a < b"), "a < b");
+    }
 
     fn layout(name: &str) -> TrackLayout {
         TrackLayout {
