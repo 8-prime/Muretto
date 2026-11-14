@@ -100,11 +100,14 @@ pub fn apply(cx: &mut App) {
         theme.radius = RADIUS;
         theme.radius_lg = RADIUS;
         theme.shadow = false;
+        // The frame Muretto draws around its window on Linux.
+        theme.window_radius = px(0.);
 
         let c = &mut theme.colors;
         c.background = hsla(color::BG);
         c.foreground = hsla(color::TEXT);
         c.border = hsla(color::BORDER);
+        c.window_border = hsla(color::BORDER_STRONG);
         c.input = hsla(color::BORDER);
         c.ring = hsla(color::BORDER_STRONG);
         c.caret = hsla(color::TEXT);

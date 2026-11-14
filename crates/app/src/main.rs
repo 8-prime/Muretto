@@ -2,6 +2,8 @@ use gpui_kit::prelude::*;
 use muretto::{assets::Assets, shell::Shell};
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    muretto::icon::install_desktop_entry();
     gpui_kit::application().with_assets(Assets).run(|cx| {
         muretto::init(cx);
         cx.on_window_closed(|cx, _| {

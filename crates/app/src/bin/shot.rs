@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 use muretto::{
     assets::Assets,
-    shell::{Shell, Sources},
+    shell::{Shell, ShowWindowControls, Sources},
 };
 use muretto_core::{Install, Library};
 
@@ -33,7 +33,10 @@ fn main() {
         Arc::new(Assets),
         gpui_kit::platform::current_headless_renderer,
     );
-    cx.update(muretto::init);
+    cx.update(|cx| {
+        muretto::init(cx);
+        cx.set_global(ShowWindowControls);
+    });
     let (window, shell) = cx
         .update(|cx| {
             gpui_kit::open_window(

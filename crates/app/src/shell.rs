@@ -2,9 +2,9 @@
 //! middle, and the next session with its launch button along the bottom.
 
 use gpui_kit::{
-    AnyElement, Context, Div, Entity, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight,
-    IntoElement, Render, SharedString, Subscription, TestSupportExt as _, Window, div, prelude::*,
-    px, rgb,
+    AnyElement, App, Context, Decorations, Div, Entity, Font, FontFallbacks, FontFeatures,
+    FontStyle, FontWeight, Global, IntoElement, MouseButton, Render, SharedString, Stateful,
+    Subscription, TestSupportExt as _, Window, WindowControlArea, div, prelude::*, px, rgb, svg,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -135,6 +135,9 @@ pub struct Shell {
     tabs: [usize; SECTIONS.len()],
     picker: Option<(Entity<Picker>, Subscription)>,
     getting: Option<(Entity<GetDialog>, Subscription)>,
+    /// The pointer went down on the title bar; moving it now moves the
+    /// window.
+    moving: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -219,6 +222,7 @@ impl Shell {
             tabs: [0; SECTIONS.len()],
             picker: None,
             getting: None,
+            moving: false,
             _subscriptions: Vec::new(),
         }
     }
@@ -342,7 +346,10 @@ impl Shell {
         cx.notify();
     }
 
-    fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The section navigation, which is also the window's title bar: the
+    /// logo and the empty stretch move the window, and on Linux and Windows
+    /// it ends in the window's controls.
+    fn top_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (status, healthy): (SharedString, bool) = match &self.stage {
             Stage::Loading => ("Reading content…".into(), false),
             Stage::Unavailable(_) => ("Game not found".into(), false),
@@ -355,18 +362,25 @@ impl Shell {
             },
         };
 
+        let controls = draws_controls(window, cx);
         div()
             .flex()
             .flex_none()
             .items_center()
             .h(px(56.))
-            .pl(PAGE)
-            .pr(PAGE)
+            // Clear of the traffic lights.
+            .pl(if cfg!(target_os = "macos") {
+                px(84.)
+            } else {
+                PAGE
+            })
+            .when(!controls, |bar| bar.pr(PAGE))
             .bg(rgb(color::BG))
             .border_b_1()
             .border_color(rgb(color::BORDER))
             .child(
-                div()
+                self.drag_area("title-logo", cx)
+                    .h_full()
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -419,7 +433,7 @@ impl Shell {
                     })
                     .test_support()
             }))
-            .child(div().flex_1())
+            .child(self.drag_area("title-drag", cx).flex_1().h_full())
             .child(
                 // The status doubles as the way to the patch's page.
                 div()
@@ -447,6 +461,47 @@ impl Shell {
                             .child(status),
                     ),
             )
+            .when(controls, |bar| bar.child(window_controls(window, cx)))
+    }
+
+    /// Part of the title bar that moves the window when dragged, maximises
+    /// it when double-clicked and opens the window menu on a right click.
+    fn drag_area(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .window_control_area(WindowControlArea::Drag)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, _| {
+                    if event.click_count >= 2 {
+                        this.moving = false;
+                        if cfg!(target_os = "macos") {
+                            window.titlebar_double_click();
+                        } else {
+                            window.zoom_window();
+                        }
+                    } else {
+                        this.moving = true;
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.moving = false),
+            )
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                // Linux and macOS leave moving to the app; Windows moves
+                // the window itself over a drag area.
+                if this.moving && !cfg!(target_os = "windows") {
+                    this.moving = false;
+                    window.start_window_move();
+                }
+            }))
+            .on_mouse_down(MouseButton::Right, |event, window, _| {
+                if is_client_decorated(window) {
+                    window.show_window_menu(event.position);
+                }
+            })
     }
 
     fn tab_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -701,7 +756,9 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    // gpui-kit's root view puts this inside the window frame: a border with
+    // resize handles, drawn where the system draws none.
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .relative()
             .flex()
@@ -722,13 +779,114 @@ impl Render for Shell {
                 style: FontStyle::Normal,
             })
             .text_size(px(13.))
-            .child(self.top_bar(cx))
+            .child(self.top_bar(window, cx))
             .children(self.tab_bar(cx))
             .child(div().flex_1().min_h_0().child(self.content()))
             .child(self.session_bar(cx))
             .children(self.picker.as_ref().map(|(picker, _)| picker.clone()))
             .children(self.getting.as_ref().map(|(dialog, _)| dialog.clone()))
     }
+}
+
+/// Draws the window controls whatever the platform does, for pictures of
+/// the interface taken offscreen, where windows have no decorations.
+pub struct ShowWindowControls;
+
+impl Global for ShowWindowControls {}
+
+fn is_client_decorated(window: &Window) -> bool {
+    matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
+/// Whether Muretto has to draw minimise, maximise and close: on Windows,
+/// and on Linux when the compositor left decorating the window to it. macOS
+/// keeps its own.
+fn draws_controls(window: &Window, cx: &App) -> bool {
+    cx.has_global::<ShowWindowControls>()
+        || cfg!(target_os = "windows")
+        || (cfg!(target_os = "linux") && is_client_decorated(window))
+}
+
+/// Minimise, maximise or restore, and close, as wide flat buttons the
+/// height of the title bar. Close lights up in the accent.
+fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
+    let forced = cx.has_global::<ShowWindowControls>();
+    let supported = window.window_controls();
+    let maximized = window.is_maximized();
+    let button = |id: &'static str, icon: &'static str, area: WindowControlArea| {
+        let close = area == WindowControlArea::Close;
+        div()
+            .id(id)
+            .group(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(52.))
+            .h_full()
+            .hover(move |style| style.bg(rgb(if close { color::ACCENT } else { color::RAISED })))
+            .active(move |style| {
+                style.bg(rgb(if close {
+                    color::ACCENT_ACTIVE
+                } else {
+                    color::CHIP
+                }))
+            })
+            .window_control_area(area)
+            // Windows handles presses on these areas itself.
+            .when(!cfg!(target_os = "windows"), |button| {
+                button
+                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        match area {
+                            WindowControlArea::Min => window.minimize_window(),
+                            WindowControlArea::Max => window.zoom_window(),
+                            WindowControlArea::Close => window.remove_window(),
+                            WindowControlArea::Drag => {}
+                        }
+                    })
+            })
+            .child(
+                svg()
+                    .path(icon)
+                    .size(px(if close { 17. } else { 14. }))
+                    .text_color(rgb(color::TEXT_MUTED))
+                    .group_hover(id, |style| style.text_color(rgb(color::TEXT))),
+            )
+            .test_support()
+    };
+    div()
+        .flex()
+        .h_full()
+        .ml(px(16.))
+        .border_l_1()
+        .border_color(rgb(color::BORDER))
+        .when(forced || supported.minimize, |controls| {
+            controls.child(button(
+                "window-minimize",
+                "icons/minus.svg",
+                WindowControlArea::Min,
+            ))
+        })
+        .when(forced || supported.maximize, |controls| {
+            controls.child(button(
+                "window-maximize",
+                if maximized {
+                    "icons/copy.svg"
+                } else {
+                    "icons/square.svg"
+                },
+                WindowControlArea::Max,
+            ))
+        })
+        .child(button(
+            "window-close",
+            "icons/x.svg",
+            WindowControlArea::Close,
+        ))
 }
 
 /// A centred heading and sentence, for screens with nothing else to show.

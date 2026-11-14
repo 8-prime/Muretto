@@ -35,6 +35,15 @@ description = "Render the app offscreen to a PNG: cargo make shot out.png [eleme
 command = "cargo"
 args = ["run", "-q", "-p", "muretto", "--features", "shot", "--bin", "shot", "--", "${@}"]
 
+[tasks.icons]
+description = "Render the app icon's PNGs from crates/app/assets/icon/muretto.svg. Needs rsvg-convert."
+script = '''
+cd crates/app/assets/icon
+for size in 32 48 64 128 256 512; do
+  rsvg-convert -w "$size" -h "$size" muretto.svg -o "muretto-$size.png"
+done
+'''
+
 [tasks.scan]
 description = "Print what Muretto finds on this machine."
 command = "cargo"

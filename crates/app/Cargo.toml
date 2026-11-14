@@ -12,6 +12,9 @@ shot = ["gpui-kit/test-support"]
 [dependencies]
 muretto-core.workspace = true
 gpui-kit.workspace = true
+dirs.workspace = true
+# The version gpui decodes with, for the window icon.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

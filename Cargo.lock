@@ -4326,7 +4326,9 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 name = "muretto"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "gpui-kit",
+ "image",
  "muretto-core",
  "zip",
 ]
