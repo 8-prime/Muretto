@@ -2,6 +2,7 @@
 
 pub mod assets;
 pub mod game;
+pub mod job;
 pub mod screens;
 pub mod shell;
 pub mod theme;

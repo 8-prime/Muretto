@@ -1,178 +1,26 @@
-//! Settings: a list of pages on the left, the chosen page on the right.
+//! Settings › Custom Shaders Patch › Versions and updates.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, Context, Div, Entity, FontWeight, IntoElement, PathPromptOptions, Render,
-    SharedString, TestSupportExt as _, Window, div, prelude::*, px, relative, rgb,
+    Context, Div, Entity, FontWeight, IntoElement, PathPromptOptions, Render, SharedString, Window,
+    div, prelude::*, px, relative, rgb,
 };
 use muretto_core::{
     Error, Install,
     install::Runtime,
     packages::{
-        Progress, Stage,
+        Progress,
         csp::{self, Catalogue, Installed, Release, Standing, version_key},
     },
 };
 
 use crate::{
     game::Game,
+    job::Job,
     theme::{GAP, PAGE, RADIUS, color, font},
     ui::{button, display, mono, muted, panel, stat_strip, tracked},
 };
-
-/// Pages, grouped as in the sidebar. Only some exist yet.
-const GROUPS: [(&str, &[&str]); 3] = [
-    (
-        "Assetto Corsa",
-        &[
-            "Video",
-            "Audio",
-            "Controls",
-            "Assists and realism",
-            "In-game apps",
-            "System",
-        ],
-    ),
-    (
-        "Custom Shaders Patch",
-        &[
-            PATCH_PAGE,
-            "General patch settings",
-            "Lighting FX",
-            "Weather FX",
-            "Rain FX",
-            "Graphics adjustments",
-        ],
-    ),
-    (
-        "Launcher",
-        &[
-            "General",
-            "Game and content folders",
-            "Runtime",
-            "Integrations",
-            "About and updates",
-        ],
-    ),
-];
-const PATCH_PAGE: &str = "Versions and updates";
-
-pub struct SettingsScreen {
-    page: &'static str,
-    patch: Entity<PatchPage>,
-}
-
-impl SettingsScreen {
-    pub fn new(game: Entity<Game>, source: Arc<dyn csp::Source>, cx: &mut Context<Self>) -> Self {
-        let patch = cx.new(|cx| PatchPage::new(game, source, cx));
-        cx.observe(&patch, |_, _, cx| cx.notify()).detach();
-        Self {
-            page: PATCH_PAGE,
-            patch,
-        }
-    }
-
-    pub fn show_patch(&mut self, cx: &mut Context<Self>) {
-        self.page = PATCH_PAGE;
-        cx.notify();
-    }
-}
-
-impl Render for SettingsScreen {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (_, patch_state, patch_tone) = self.patch.read(cx).standing(cx);
-        let mut sidebar = div()
-            .id("settings-pages")
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(232.))
-            .h_full()
-            .py(px(8.))
-            .border_r_1()
-            .border_color(rgb(color::BORDER))
-            .overflow_y_scroll();
-        for (group, pages) in GROUPS {
-            sidebar = sidebar.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px(PAGE)
-                    .pt(px(16.))
-                    .pb(px(8.))
-                    // The longest heading breaks in two to leave room for the
-                    // patch's state beside it.
-                    .child(
-                        div().flex().flex_col().children(
-                            group
-                                .split_once(" Patch")
-                                .map_or(vec![group], |(first, _)| vec![first, "Patch"])
-                                .into_iter()
-                                .map(|line| display(line, 14.).text_color(rgb(color::TEXT_MUTED))),
-                        ),
-                    )
-                    .when(group == "Custom Shaders Patch", |heading| {
-                        heading.child(
-                            tracked(&patch_state.to_uppercase(), px(10.), 0.12)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(patch_tone)),
-                        )
-                    }),
-            );
-            for (index, &page) in pages.iter().enumerate() {
-                let chosen = page == self.page;
-                sidebar = sidebar.child(
-                    div()
-                        .id((group, index))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .h(px(31.))
-                        .px(PAGE)
-                        .text_size(px(13.5))
-                        .cursor_pointer()
-                        .map(|row| {
-                            if chosen {
-                                row.bg(rgb(color::ACCENT_WASH))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                            } else {
-                                row.hover(|style| style.bg(rgb(color::SURFACE)))
-                            }
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.page = page;
-                            cx.notify();
-                        }))
-                        .child(page)
-                        .test_support(),
-                );
-            }
-        }
-
-        let page: AnyElement = if self.page == PATCH_PAGE {
-            self.patch.clone().into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.))
-                .size_full()
-                .child(display(self.page, 27.))
-                .child(muted("This part of Muretto has not been built yet."))
-                .into_any_element()
-        };
-        div()
-            .flex()
-            .size_full()
-            .child(sidebar)
-            .child(div().flex_1().min_w_0().h_full().child(page))
-    }
-}
 
 enum Offer {
     Loading,
@@ -181,11 +29,6 @@ enum Offer {
     /// The download page could not be read; these are the builds Muretto
     /// knew about when it was made.
     BuiltIn(Catalogue, SharedString),
-}
-
-struct Job {
-    title: SharedString,
-    progress: Arc<Progress>,
 }
 
 /// Settings › Custom Shaders Patch › Versions and updates.
@@ -203,7 +46,7 @@ pub struct PatchPage {
 const VERSIONS_SHOWN: usize = 6;
 
 impl PatchPage {
-    fn new(game: Entity<Game>, source: Arc<dyn csp::Source>, cx: &mut Context<Self>) -> Self {
+    pub fn new(game: Entity<Game>, source: Arc<dyn csp::Source>, cx: &mut Context<Self>) -> Self {
         cx.observe(&game, |_, _, cx| cx.notify()).detach();
         let listing = cx.background_executor().spawn({
             let source = source.clone();
@@ -241,7 +84,7 @@ impl PatchPage {
 
     /// Where the installed patch stands: in full, in a word for the
     /// sidebar, and the colour to say it in.
-    fn standing(&self, cx: &gpui_kit::App) -> (&'static str, &'static str, u32) {
+    pub fn standing(&self, cx: &gpui_kit::App) -> (&'static str, &'static str, u32) {
         let Some(patch) = &self.game.read(cx).patch else {
             return ("Not installed", "Missing", color::WARN);
         };
@@ -262,8 +105,8 @@ impl PatchPage {
         }
     }
 
-    /// Runs an installation in the background, redrawing while it reports
-    /// progress and refreshing the game's state when it ends.
+    /// Runs an installation in the background and refreshes the game's
+    /// state when it ends.
     fn run(
         &mut self,
         title: impl Into<SharedString>,
@@ -273,48 +116,18 @@ impl PatchPage {
         if self.job.is_some() {
             return;
         }
-        let progress = Progress::new();
-        let install = self.game.read(cx).install.clone();
         self.error = None;
         self.confirming_removal = false;
-        self.job = Some(Job {
-            title: title.into(),
-            progress: progress.clone(),
-        });
-        cx.notify();
-
-        let working = cx
-            .background_executor()
-            .spawn(async move { work(&install, &progress) });
-        cx.spawn(async move |this, cx| {
-            let result = working.await;
-            this.update(cx, |this, cx| {
-                this.job = None;
-                match result {
-                    Ok(_) | Err(Error::Cancelled) => {}
-                    Err(error) => this.error = Some(error.to_string().into()),
-                }
-                this.game.update(cx, |game, cx| game.refresh_patch(cx));
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(120))
-                    .await;
-                let running = this.update(cx, |this, cx| {
-                    cx.notify();
-                    this.job.is_some()
-                });
-                if !running.unwrap_or(false) {
-                    break;
-                }
+        let install = self.game.read(cx).install.clone();
+        self.job = Some(Job::start(title, install, cx, work, |this, result, cx| {
+            this.job = None;
+            match result {
+                Ok(_) | Err(Error::Cancelled) => {}
+                Err(error) => this.error = Some(error.to_string().into()),
             }
-        })
-        .detach();
+            this.game.update(cx, |game, cx| game.refresh_installed(cx));
+        }));
+        cx.notify();
     }
 
     fn install(&mut self, release: Release, cx: &mut Context<Self>) {
@@ -360,7 +173,7 @@ impl PatchPage {
         self.confirming_removal = false;
         let install = self.game.read(cx).install.clone();
         self.error = csp::remove(&install).err().map(|e| e.to_string().into());
-        self.game.update(cx, |game, cx| game.refresh_patch(cx));
+        self.game.update(cx, |game, cx| game.refresh_installed(cx));
         cx.notify();
     }
 
@@ -444,68 +257,7 @@ impl PatchPage {
                 .rounded(RADIUS)
         };
         if let Some(job) = &self.job {
-            let progress = &job.progress;
-            let megabytes = |bytes: u64| format!("{:.1}", bytes as f64 / 1e6);
-            let detail = match (progress.stage(), progress.total()) {
-                (Stage::Starting, _) => "Contacting the download site".to_owned(),
-                (Stage::Downloading, Some(total)) => {
-                    format!(
-                        "Downloading · {} of {} MB",
-                        megabytes(progress.done()),
-                        megabytes(total)
-                    )
-                }
-                (Stage::Downloading, None) => {
-                    format!("Downloading · {} MB", megabytes(progress.done()))
-                }
-                (Stage::Unpacking, _) => "Unpacking".to_owned(),
-                (Stage::Installing, _) => "Moving files into the game folder".to_owned(),
-            };
-            let cancellable = progress.stage() != Stage::Installing;
-            let progress = progress.clone();
-            return Some(
-                strip()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .child(
-                                        div()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(job.title.clone()),
-                                    )
-                                    .child(mono(detail, 12.5).text_color(rgb(color::TEXT_MUTED))),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(4.))
-                                    .rounded_full()
-                                    .bg(rgb(color::BORDER))
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .w(relative(progress.fraction().unwrap_or(0.)))
-                                            .rounded_full()
-                                            .bg(rgb(color::ACCENT)),
-                                    ),
-                            ),
-                    )
-                    .when(cancellable, |strip| {
-                        strip.child(
-                            button("patch-cancel", "Cancel")
-                                .on_click(move |_, _, _| progress.cancel()),
-                        )
-                    }),
-            );
+            return Some(strip().child(job.strip().flex_1()));
         }
         if let Some(error) = &self.error {
             return Some(

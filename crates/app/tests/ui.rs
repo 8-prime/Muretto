@@ -14,12 +14,14 @@ use gpui_kit::{
 };
 use muretto::{
     game::{Game, Launch},
-    shell::Shell,
+    shell::{Shell, Sources},
 };
 use muretto_core::{
     Error, Install, Library,
-    packages::{Progress, csp},
+    online::{self, Facet, Lobby, Server, Slot},
+    packages::{Progress, csp, recipes::PURE, weather_fx},
     session::SessionMode,
+    steam::SteamUser,
 };
 
 /// A game folder with three cars, two tracks and one weather.
@@ -112,6 +114,57 @@ impl csp::Source for Shelf {
     }
 }
 
+/// Stands in for the official lobby: three servers, one on a track the
+/// fixture lacks, and slots that leave only the second car free.
+struct Paddock;
+
+const PADDOCK: &str = r#"[
+  {"ip":"10.0.0.1","port":9600,"cport":8081,"tport":9600,"name":"Park Sprint","clients":3,"maxclients":4,
+   "track":"park-short","cars":["alpha_gt3","beta_gt3"],"session":3,"sessiontypes":[1,3],"durations":[10,8],
+   "timeleft":300,"country":["Italy","IT"],"pass":false},
+  {"ip":"10.0.0.2","port":9600,"cport":8081,"tport":9600,"name":"Ring Cruise","clients":1,"maxclients":10,
+   "track":"ring","cars":["gamma_road","delta_missing"],"session":1,"sessiontypes":[1],"durations":[60],
+   "timeleft":1200,"country":["Germany","DE"],"pass":false},
+  {"ip":"10.0.0.3","port":9600,"cport":8081,"tport":9600,"name":"Faraway","clients":0,"maxclients":20,
+   "track":"csp/2651/../faraway","cars":["alpha_gt3"],"session":1,"sessiontypes":[1],"durations":[60],
+   "timeleft":0,"country":["Japan","JP"],"pass":true}
+]"#;
+
+impl online::Source for Paddock {
+    fn player(&self) -> muretto_core::Result<SteamUser> {
+        Ok(SteamUser {
+            id: "76561198000000001".to_owned(),
+            name: "L. Brandt".to_owned(),
+        })
+    }
+
+    fn servers(&self, _: &SteamUser) -> muretto_core::Result<Lobby> {
+        Ok(Lobby {
+            servers: online::parse_lobby(PADDOCK)?,
+            stale: None,
+        })
+    }
+
+    fn slots(&self, server: &Server, _: &SteamUser) -> muretto_core::Result<Vec<Slot>> {
+        let slot = |car: &str, driver: Option<&str>| Slot {
+            car: car.to_owned(),
+            skin: "blue".to_owned(),
+            driver: driver.map(str::to_owned),
+            connected: driver.is_some(),
+            yours: false,
+        };
+        Ok(match server.name.as_str() {
+            "Park Sprint" => vec![
+                slot("alpha_gt3", Some("T. Okafor")),
+                slot("alpha_gt3", Some("M. Lindqvist")),
+                slot("beta_gt3", Some("R. Castellano")),
+                slot("beta_gt3", None),
+            ],
+            _ => Vec::new(),
+        })
+    }
+}
+
 fn open(cx: &mut TestAppContext, root: &Path) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
     open_with(cx, root, Shelf { online: true })
 }
@@ -136,7 +189,11 @@ fn open_with(
             },
             cx,
             |window, cx| {
-                cx.new(|cx| Shell::with_content(install, library, Arc::new(patches), window, cx))
+                let sources = Sources {
+                    patches: Arc::new(patches),
+                    servers: Arc::new(Paddock),
+                };
+                cx.new(|cx| Shell::with_content(install, library, sources, window, cx))
             },
         )
         .unwrap();
@@ -357,4 +414,233 @@ fn without_a_connection_the_known_builds_are_offered_and_failure_is_shown(cx: &m
     .unwrap();
     assert!(!root.join("dwrite.dll").exists());
     assert!(!root.join(".muretto/downloads").exists());
+}
+
+const WEATHER_PAGE: (&str, usize) = ("Custom Shaders Patch", 3);
+
+/// Puts a copy of the patch into the game folder, as if installed earlier.
+fn with_patch(root: &Path) {
+    let write = |path: &str, contents: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+    write("dwrite.dll", "loader");
+    write(
+        "extension/config/data_manifest.ini",
+        "[VERSION]\nSHADERS_PATCH=0.2.11\n",
+    );
+    write(
+        "extension/config/weather_fx.ini",
+        "[BASIC]\nENABLED=1\nCONTROLLER=sol\nIMPLEMENTATION=base\n",
+    );
+    write("extension/weather/base/weather.lua", "");
+    write(
+        "extension/weather/base/manifest.ini",
+        "[ABOUT]\nNAME = Default\nVERSION = 1.6\n",
+    );
+}
+
+/// A zip laid out the way Pure's is, wrapped in a folder.
+fn pure_archive(root: &Path) -> PathBuf {
+    use std::io::Write as _;
+    let path = root.parent().unwrap().join("Pure 0.257.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, contents) in [
+        ("Pure 0.257/extension/weather/pure/weather.lua", "script"),
+        (
+            "Pure 0.257/extension/weather/pure/manifest.ini",
+            "[ABOUT]\nNAME = Pure\nAUTHOR = Peter Boese\nVERSION = 0.257\n",
+        ),
+        (
+            "Pure 0.257/extension/weather-controllers/pureCtrl/controller.lua",
+            "ctrl",
+        ),
+        ("Pure 0.257/apps/lua/Pure Config/manifest.ini", "app"),
+    ] {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(contents.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    path
+}
+
+#[gpui_kit::test]
+fn pure_is_got_through_the_dialog_put_to_use_and_removed(cx: &mut TestAppContext) {
+    let root = game_folder("pure");
+    with_patch(&root);
+    let archive = pure_archive(&root);
+    let (window, game, shell) = open(cx, &root);
+    let install = cx.update(|cx| game.read(cx).install.clone());
+
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(WEATHER_PAGE, cx));
+    act(cx, window, |window, cx| {
+        window.click(("recipe-get", 0usize), cx)
+    });
+    // Its page opens in the browser while the dialog waits for the archive.
+    assert_eq!(cx.opened_url().as_deref(), Some(PURE.page));
+    let dialog = cx.update(|cx| {
+        shell
+            .read(cx)
+            .getting()
+            .expect("the dialog is open")
+            .clone()
+    });
+
+    // What a drop or the file chooser hands over.
+    cx.update(|cx| dialog.update(cx, |dialog, cx| dialog.accept(archive, cx)));
+    cx.run_until_parked();
+    let installed = PURE.installed(&install).expect("Pure is installed");
+    assert_eq!(installed.version.as_deref(), Some("0.257"));
+    assert!(!PURE.in_use(&install));
+
+    act(cx, window, |window, cx| window.click("get-use", cx));
+    assert!(PURE.in_use(&install));
+    assert_eq!(weather_fx::settings(&install).controller, "pureCtrl");
+    cx.update(|cx| assert!(shell.read(cx).getting().is_none()));
+
+    // On the page it is now a style like any other, and can be removed.
+    // Styles are in name order: Default, Pure.
+    act(cx, window, |window, cx| {
+        window.click(("style-remove", 1usize), cx)
+    });
+    assert!(PURE.installed(&install).is_some(), "removal asks first");
+    act(cx, window, |window, cx| {
+        window.click(("style-remove-confirm", 1usize), cx)
+    });
+    assert_eq!(PURE.installed(&install), None);
+    assert_eq!(weather_fx::settings(&install).style, "base");
+    assert!(root.join("extension/weather/base/weather.lua").is_file());
+}
+
+#[gpui_kit::test]
+fn the_wrong_archive_is_refused_and_the_dialog_keeps_waiting(cx: &mut TestAppContext) {
+    let root = game_folder("pure-wrong");
+    with_patch(&root);
+    let (window, game, shell) = open(cx, &root);
+    let install = cx.update(|cx| game.read(cx).install.clone());
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(WEATHER_PAGE, cx));
+    act(cx, window, |window, cx| {
+        window.click(("recipe-get", 0usize), cx)
+    });
+    let dialog = cx.update(|cx| shell.read(cx).getting().unwrap().clone());
+
+    let not_a_zip = root.parent().unwrap().join("notes.txt");
+    std::fs::write(&not_a_zip, "just text").unwrap();
+    cx.update(|cx| dialog.update(cx, |dialog, cx| dialog.accept(not_a_zip, cx)));
+    cx.run_until_parked();
+
+    assert_eq!(PURE.installed(&install), None);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        // Still open, still offering the drop zone.
+        assert!(window.try_find("get-choose-file").is_some());
+    })
+    .unwrap();
+    act(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| assert!(shell.read(cx).getting().is_none()));
+}
+
+#[gpui_kit::test]
+fn pure_waits_for_the_patch(cx: &mut TestAppContext) {
+    let root = game_folder("pure-no-patch");
+    let (window, _, _) = open(cx, &root);
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click(WEATHER_PAGE, cx));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(("recipe-get", 0usize)).is_none());
+    })
+    .unwrap();
+    // The way forward leads to the patch's page.
+    act(cx, window, |window, cx| {
+        window.click(("recipe-needs-patch", 0usize), cx)
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("patch-install").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn servers_are_narrowed_by_ticking_a_track_and_joined(cx: &mut TestAppContext) {
+    let root = game_folder("online");
+    let (window, game, shell) = open(cx, &root);
+    act(cx, window, |window, cx| {
+        window.click(("section", 2usize), cx)
+    });
+    let online = cx.update(|cx| shell.read(cx).online().unwrap().clone());
+    let names = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let online = online.read(cx);
+            online
+                .matching()
+                .iter()
+                .map(|&i| online.listing().servers[i].server.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(cx), ["Park Sprint", "Ring Cruise", "Faraway"]);
+
+    // Tick a track from the list of tracks servers run, by typing its name
+    // and pressing enter.
+    act(cx, window, |window, cx| window.click(("facet", 0usize), cx));
+    cx.update(|cx| assert!(online.read(cx).picker().is_some()));
+    act(cx, window, |window, cx| window.input("ring", cx));
+    act(cx, window, |window, cx| window.press("enter", cx));
+    act(cx, window, |window, cx| window.press("escape", cx));
+    cx.update(|cx| {
+        let online = online.read(cx);
+        assert!(online.picker().is_none());
+        assert!(online.filter().tracks.contains("ring"));
+    });
+    assert_eq!(names(cx), ["Ring Cruise"]);
+
+    // The chip for the choice takes it away again.
+    act(cx, window, |window, cx| {
+        window.click(("chosen", 0usize), cx)
+    });
+    assert_eq!(names(cx).len(), 3);
+
+    // Choosing a server asks it for its slots; the car with room is offered.
+    act(cx, window, |window, cx| {
+        window.click(("server", 0usize), cx)
+    });
+    cx.update(|cx| {
+        let online = online.read(cx);
+        assert_eq!(online.selected().unwrap().server.name, "Park Sprint");
+        assert_eq!(online.chosen_car(), Some("beta_gt3"));
+    });
+    act(cx, window, |window, cx| window.click("only-track", cx));
+    assert_eq!(names(cx), ["Park Sprint"]);
+    cx.update(|cx| {
+        assert_eq!(
+            online.read(cx).filter().chosen(Facet::Track),
+            ["park".to_owned()]
+        )
+    });
+
+    act(cx, window, |window, cx| window.click("join", cx));
+    cx.update(|cx| {
+        let summary = online.read(cx).summary(cx).unwrap();
+        // The fixture has no simulator executable, so nothing can start.
+        assert!(matches!(&summary.launch, Launch::Failed(reason) if reason.contains("acs.exe")));
+        let race =
+            std::fs::read_to_string(game.read(cx).install.cfg_dir().join("race.ini")).unwrap();
+        for line in [
+            "ACTIVE=1",
+            "SERVER_IP=10.0.0.1",
+            "REQUESTED_CAR=beta_gt3",
+            "TRACK=park",
+            "CONFIG_TRACK=short",
+            "SKIN=blue",
+            "GUID=76561198000000001",
+        ] {
+            assert!(race.contains(&format!("{line}\r\n")), "{line} in {race}");
+        }
+    });
 }

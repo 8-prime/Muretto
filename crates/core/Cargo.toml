@@ -11,4 +11,5 @@ thiserror.workspace = true
 encoding_rs.workspace = true
 dirs.workspace = true
 ureq = { version = "3.5.2", default-features = false, features = ["gzip", "rustls"] }
-zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+# Mod archives come from 7-Zip as often as not, in any method it offers.
+zip = { version = "9.5.1", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "ppmd"] }

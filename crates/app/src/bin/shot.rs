@@ -5,7 +5,7 @@
 //!
 //! Element ids after the path are clicked in order before the picture is
 //! taken, e.g. `change-car` to capture the car list or `section:4` for the
-//! fifth section.
+//! fifth section. `drop=<file>` hands a file to the open get-a-mod dialog.
 
 use std::{sync::Arc, time::Duration};
 
@@ -13,8 +13,11 @@ use gpui_kit::{
     Bounds, ElementId, HeadlessAppContext, SharedString, WindowBounds, WindowOptions, prelude::*,
     px, size, test::TestWindowExt as _,
 };
-use muretto::{assets::Assets, shell::Shell};
-use muretto_core::{Install, Library, packages::csp};
+use muretto::{
+    assets::Assets,
+    shell::{Shell, Sources},
+};
+use muretto_core::{Install, Library};
 
 fn main() {
     let out = std::env::args()
@@ -29,7 +32,7 @@ fn main() {
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(muretto::init);
-    let (window, _) = cx
+    let (window, shell) = cx
         .update(|cx| {
             gpui_kit::open_window(
                 WindowOptions {
@@ -44,7 +47,7 @@ fn main() {
                 cx,
                 |window, cx| {
                     cx.new(|cx| {
-                        Shell::with_content(install, library, Arc::new(csp::Official), window, cx)
+                        Shell::with_content(install, library, Sources::official(), window, cx)
                     })
                 },
             )
@@ -63,6 +66,16 @@ fn main() {
     };
     settle(&mut cx);
     for id in std::env::args().skip(2) {
+        // "drop=/path/to.zip" hands a file to the open get-a-mod dialog, as
+        // dropping it on the window would.
+        if let Some(path) = id.strip_prefix("drop=") {
+            cx.update(|cx| {
+                let dialog = shell.read(cx).getting().expect("a dialog is open").clone();
+                dialog.update(cx, |dialog, cx| dialog.accept(path.into(), cx));
+            });
+            settle(&mut cx);
+            continue;
+        }
         // "section:4" names the fifth of a numbered family of elements.
         let numbered = id
             .split_once(':')

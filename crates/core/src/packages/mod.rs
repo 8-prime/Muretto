@@ -7,6 +7,8 @@
 //! writes a [`Receipt`] listing them.
 
 pub mod csp;
+pub mod recipes;
+pub mod weather_fx;
 
 use std::{
     collections::BTreeSet,
@@ -233,21 +235,54 @@ impl Staged {
     /// Moves the files into the game folder, replacing what is there, deletes
     /// whatever the previously installed version owned that this one does
     /// not, and writes the receipt.
-    pub fn install(mut self, id: &str, version: &str, progress: &Progress) -> Result<Receipt> {
+    pub fn install(
+        mut self,
+        id: &str,
+        version: &str,
+        replaced: Replaced,
+        progress: &Progress,
+    ) -> Result<Receipt> {
+        let previous = Receipt::load(&self.root, id);
+        let owned: BTreeSet<&str> = previous
+            .iter()
+            .flat_map(|receipt| receipt.files.iter().map(String::as_str))
+            .collect();
+        let backups = backups_dir(&self.root, id);
+
         progress.begin(Stage::Installing, Some(self.files.len() as u64));
         for file in &self.files {
             let target = self.root.join(file);
             create_parent(&target)?;
+            // A file that was here before this package ever was belongs to
+            // the game or to another mod: set it aside, once, so removal can
+            // put it back.
+            let backup = backups.join(file);
+            if replaced == Replaced::Kept
+                && target.is_file()
+                && !owned.contains(file.as_str())
+                && !backup.exists()
+            {
+                create_parent(&backup)?;
+                std::fs::rename(&target, &backup).map_err(io_err(&backup))?;
+            }
             std::fs::rename(self.dir.join(file), &target).map_err(io_err(&target))?;
             // Past the point of no return: count, but ignore cancellation.
             let _ = progress.advance(1);
         }
 
         let files = std::mem::take(&mut self.files);
-        if let Some(previous) = Receipt::load(&self.root, id) {
+        if let Some(previous) = &previous {
             let kept: BTreeSet<&str> = files.iter().map(String::as_str).collect();
-            let stale = previous.files.iter().filter(|f| !kept.contains(f.as_str()));
-            delete(&self.root, stale);
+            let stale: Vec<&String> = previous
+                .files
+                .iter()
+                .filter(|f| !kept.contains(f.as_str()))
+                .collect();
+            delete(&self.root, stale.iter().copied());
+            // What this version no longer overwrites gets its original back.
+            for file in stale {
+                restore(&self.root, &backups, file);
+            }
         }
         let receipt = Receipt {
             id: id.to_owned(),
@@ -269,15 +304,38 @@ impl Drop for Staged {
     }
 }
 
-/// Deletes everything the package's receipt lists, and the receipt.
-/// Returns whether there was a receipt.
+/// What becomes of files a package overwrites that it did not put there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    /// Set aside and put back when the package is removed. For mods laid
+    /// over the game's own folders.
+    Kept,
+    /// Overwritten for good. For a package that replaces an earlier copy of
+    /// itself installed by other means.
+    Discarded,
+}
+
+/// Deletes everything the package's receipt lists and the receipt, and puts
+/// back the files it had overwritten. Returns whether there was a receipt.
 pub fn uninstall(root: &Path, id: &str) -> Result<bool> {
     let Some(receipt) = Receipt::load(root, id) else {
         return Ok(false);
     };
     delete(root, receipt.files.iter());
+    let backups = backups_dir(root, id);
+    for file in &receipt.files {
+        restore(root, &backups, file);
+    }
+    let _ = std::fs::remove_dir_all(&backups);
+    if let Some(parent) = backups.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
     let path = Receipt::path(root, id);
     std::fs::remove_file(&path).map_err(io_err(&path))?;
+    // Leave no empty state folder behind once the last package is gone.
+    let state = root.join(STATE_DIR);
+    let _ = std::fs::remove_dir(state.join("packages"));
+    let _ = std::fs::remove_dir(&state);
     Ok(true)
 }
 
@@ -355,6 +413,22 @@ fn wrapper<'a>(
     })
 }
 
+fn backups_dir(root: &Path, id: &str) -> PathBuf {
+    root.join(STATE_DIR).join("backups").join(id)
+}
+
+/// Moves the set-aside original of `file` back into the game folder, if
+/// there is one.
+fn restore(root: &Path, backups: &Path, file: &str) {
+    let backup = backups.join(file);
+    if backup.is_file() {
+        let target = root.join(file);
+        if create_parent(&target).is_ok() {
+            let _ = std::fs::rename(&backup, &target);
+        }
+    }
+}
+
 /// Deletes files, then any folders that emptied.
 fn delete<'a>(root: &Path, files: impl Iterator<Item = &'a String>) {
     for file in files {
@@ -423,7 +497,9 @@ pub(crate) mod tests {
         let staged =
             Staged::unpack(&root, "pkg", &dir.join("one.zip"), in_game, &progress).unwrap();
         assert!(staged.contains("dwrite.dll") && !staged.contains("readme.txt"));
-        staged.install("pkg", "1", &progress).unwrap();
+        staged
+            .install("pkg", "1", Replaced::Discarded, &progress)
+            .unwrap();
         assert!(!root.join("readme.txt").exists());
 
         zip_of(
@@ -432,7 +508,7 @@ pub(crate) mod tests {
         );
         let receipt = Staged::unpack(&root, "pkg", &dir.join("two.zip"), in_game, &progress)
             .unwrap()
-            .install("pkg", "2", &progress)
+            .install("pkg", "2", Replaced::Discarded, &progress)
             .unwrap();
 
         assert_eq!(
@@ -454,6 +530,71 @@ pub(crate) mod tests {
         assert!(!root.join("dwrite.dll").exists() && !root.join("extension/config").exists());
         assert!(root.join("extension/weather/pure/mine.lua").exists());
         assert!(!uninstall(&root, "pkg").unwrap());
+        assert!(!root.join(".muretto").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn files_a_mod_overwrites_come_back_when_it_goes() {
+        let dir = temp_dir("backups");
+        let root = dir.join("game");
+        std::fs::create_dir_all(root.join("system/cfg/ppfilters")).unwrap();
+        std::fs::write(root.join("system/cfg/ppfilters/default.ini"), "stock").unwrap();
+        let progress = Progress::new();
+        let overlay = |path: &str| path.starts_with("system/");
+        let install = |archive: &str, version: &str| {
+            Staged::unpack(&root, "mod", &dir.join(archive), overlay, &progress)
+                .unwrap()
+                .install("mod", version, Replaced::Kept, &progress)
+                .unwrap()
+        };
+
+        zip_of(
+            &dir.join("one.zip"),
+            &[
+                ("system/cfg/ppfilters/default.ini", "modded 1"),
+                ("system/cfg/ppfilters/mod.ini", "new"),
+            ],
+        );
+        install("one.zip", "1");
+        // Updating must not mistake the mod's own file for the original.
+        zip_of(
+            &dir.join("two.zip"),
+            &[("system/cfg/ppfilters/default.ini", "modded 2")],
+        );
+        install("two.zip", "2");
+        let read =
+            |file: &str| std::fs::read_to_string(root.join("system/cfg/ppfilters").join(file));
+        assert_eq!(read("default.ini").unwrap(), "modded 2");
+        assert!(read("mod.ini").is_err());
+
+        assert!(uninstall(&root, "mod").unwrap());
+        assert_eq!(read("default.ini").unwrap(), "stock");
+        assert!(!root.join(".muretto/backups").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archives_packed_by_7zip_are_read() {
+        // Pure 3.21 is packed with LZMA; 7-Zip also offers bzip2. Written by
+        // Python's zipfile, as the zip crate cannot write LZMA.
+        let dir = temp_dir("methods");
+        for (name, bytes) in [
+            ("lzma", &include_bytes!("testdata/lzma.zip")[..]),
+            ("bzip2", &include_bytes!("testdata/bzip2.zip")[..]),
+        ] {
+            let archive = dir.join(format!("{name}.zip"));
+            std::fs::write(&archive, bytes).unwrap();
+            let staged = Staged::unpack(
+                &dir.join("game"),
+                "pkg",
+                &archive,
+                in_game,
+                &Progress::new(),
+            )
+            .unwrap();
+            assert_eq!(staged.read("extension/a.lua").unwrap(), b"packed", "{name}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

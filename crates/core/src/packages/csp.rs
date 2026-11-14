@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use super::{Progress, Receipt, Staged, download, downloads_dir, fetch_text, uninstall};
+use super::{Progress, Receipt, Replaced, Staged, download, downloads_dir, fetch_text, uninstall};
 use crate::{Error, Install, Result, ini::Ini, io_err, lenient};
 
 pub const ID: &str = "csp";
@@ -206,7 +206,7 @@ pub fn install_from_file(
                     .to_owned(),
             )
         })?;
-    staged.install(ID, &version, progress)?;
+    staged.install(ID, &version, Replaced::Discarded, progress)?;
     installed(install)
         .ok_or_else(|| Error::Archive("The patch did not install correctly.".to_owned()))
 }

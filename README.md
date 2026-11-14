@@ -33,11 +33,18 @@ cargo run -p muretto --features shot --bin shot -- cars.png change-car
 
 ## What Muretto writes into the game folder
 
-Installing a package (so far: Custom Shaders Patch, under Settings) unpacks it
+Installing a package (so far: Custom Shaders Patch and Pure, under Settings) unpacks it
 into `.muretto/staging` inside the game folder, checks it, then moves the
 files into place. A receipt of every file is kept in `.muretto/packages`, so
 an update clears out what the old version left behind and a removal takes
-exactly what was added.
+exactly what was added. Game files a mod overwrites are set aside in
+`.muretto/backups` and put back when the mod is removed.
+
+Mods Muretto cannot download itself are described by a recipe in
+`crates/core/src/packages/recipes.rs`: where the player gets it, how to
+recognise its archive, and what using it means. Getting one opens its page in
+the browser and a dialog in Muretto that takes the downloaded zip by drop or
+file choice. Add a mod by adding a recipe.
 
 To try an install against the real download without touching the game:
 

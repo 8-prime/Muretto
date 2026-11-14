@@ -7,22 +7,25 @@ use gpui_kit::{
 };
 use std::sync::Arc;
 
-use muretto_core::{Install, Library, packages::csp, session::format_time};
+use muretto_core::{Install, Library, online, packages::csp, session::format_time};
 
 use crate::{
     APP_NAME,
     game::{Game, Launch},
     screens::{
         drive::{DriveEvent, DriveScreen},
+        get_mod::{GetDialog, GetEvent},
+        online::OnlineScreen,
         picker::{Picker, PickerEvent, PickerItem},
-        settings::SettingsScreen,
+        settings::{SettingsEvent, SettingsScreen},
     },
     theme::{PAGE, color, font},
-    ui::{button, display, label, launch_button, slant, tracked},
+    ui::{button, display, label, launch_button, muted, slant, tracked},
 };
 
 const DRIVE: usize = 0;
 const CONTENT: usize = 1;
+const ONLINE: usize = 2;
 const SETTINGS: usize = 4;
 
 /// Sections and the tabs within each.
@@ -63,8 +66,25 @@ enum Stage {
     Ready {
         game: Entity<Game>,
         drive: Entity<DriveScreen>,
+        online: Entity<OnlineScreen>,
         settings: Entity<SettingsScreen>,
     },
+}
+
+/// Where the screens get what they fetch from the internet.
+#[derive(Clone)]
+pub struct Sources {
+    pub patches: Arc<dyn csp::Source>,
+    pub servers: Arc<dyn online::Source>,
+}
+
+impl Sources {
+    pub fn official() -> Self {
+        Self {
+            patches: Arc::new(csp::Official),
+            servers: Arc::new(online::Official),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +99,7 @@ pub struct Shell {
     /// The open tab of each section.
     tabs: [usize; SECTIONS.len()],
     picker: Option<(Entity<Picker>, Subscription)>,
+    getting: Option<(Entity<GetDialog>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,7 +120,7 @@ impl Shell {
             this.update_in(cx, |this, window, cx| {
                 match found {
                     Ok((install, library)) => {
-                        this.show(install, library, Arc::new(csp::Official), window, cx)
+                        this.show(install, library, Sources::official(), window, cx)
                     }
                     Err(error) => this.stage = Stage::Unavailable(error.to_string().into()),
                 }
@@ -111,18 +132,26 @@ impl Shell {
         Self::loading()
     }
 
-    /// Opens directly on content that has already been read, taking patch
-    /// builds from `patches`.
+    /// Opens directly on content that has already been read, fetching from
+    /// `sources`.
     pub fn with_content(
         install: Install,
         library: Library,
-        patches: Arc<dyn csp::Source>,
+        sources: Sources,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut shell = Self::loading();
-        shell.show(install, library, patches, window, cx);
+        shell.show(install, library, sources, window, cx);
         shell
+    }
+
+    /// The Online screen, once content has been read.
+    pub fn online(&self) -> Option<&Entity<OnlineScreen>> {
+        match &self.stage {
+            Stage::Ready { online, .. } => Some(online),
+            _ => None,
+        }
     }
 
     /// The game and session, once content has been read.
@@ -134,8 +163,18 @@ impl Shell {
     }
 
     /// Whether a car or track list is open over the window.
+    /// The dialog taking a mod's archive from the player, while it is open.
+    pub fn getting(&self) -> Option<&Entity<GetDialog>> {
+        self.getting.as_ref().map(|(dialog, _)| dialog)
+    }
+
     pub fn is_choosing(&self) -> bool {
         self.picker.is_some()
+    }
+
+    /// Whether Online › All servers is showing.
+    fn on_servers(&self) -> bool {
+        self.section == ONLINE && self.tabs[ONLINE] == 0
     }
 
     fn loading() -> Self {
@@ -144,6 +183,7 @@ impl Shell {
             section: DRIVE,
             tabs: [0; SECTIONS.len()],
             picker: None,
+            getting: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -152,7 +192,7 @@ impl Shell {
         &mut self,
         install: Install,
         library: Library,
-        patches: Arc<dyn csp::Source>,
+        sources: Sources,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -164,9 +204,12 @@ impl Shell {
         };
         let game = cx.new(|_| game);
         let drive = cx.new(|cx| DriveScreen::new(game.clone(), window, cx));
-        let settings = cx.new(|cx| SettingsScreen::new(game.clone(), patches, cx));
+        let settings = cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, cx));
+        let online = cx.new(|cx| OnlineScreen::new(game.clone(), sources.servers, window, cx));
         self._subscriptions = vec![
             cx.observe(&game, |_, _, cx| cx.notify()),
+            // The bottom bar shows the chosen server.
+            cx.observe(&online, |_, _, cx| cx.notify()),
             cx.subscribe_in(&drive, window, |this, _, event: &DriveEvent, window, cx| {
                 let choosing = match event {
                     DriveEvent::ChooseCar => Choosing::Car,
@@ -174,10 +217,24 @@ impl Shell {
                 };
                 this.choose(choosing, window, cx);
             }),
+            cx.subscribe_in(&settings, window, {
+                let game = game.clone();
+                move |this, _, event: &SettingsEvent, window, cx| {
+                    let SettingsEvent::Get(recipe) = *event;
+                    let dialog = cx.new(|cx| GetDialog::new(game.clone(), recipe, window, cx));
+                    let closed = cx.subscribe(&dialog, |this, _, _: &GetEvent, cx| {
+                        this.getting = None;
+                        cx.notify();
+                    });
+                    this.getting = Some((dialog, closed));
+                    cx.notify();
+                }
+            }),
         ];
         self.stage = Stage::Ready {
             game,
             drive,
+            online,
             settings,
         };
     }
@@ -300,6 +357,11 @@ impl Shell {
                     .border_color(rgb(if active { color::BORDER } else { color::BG }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.section = index;
+                        if index == ONLINE
+                            && let Some(online) = this.online()
+                        {
+                            online.update(cx, |online, cx| online.visit(cx));
+                        }
                         cx.notify();
                     }))
                     .child(display(name, 19.).text_color(rgb(if active {
@@ -438,12 +500,17 @@ impl Shell {
                 ),
             ),
             Stage::Ready {
-                drive, settings, ..
+                drive,
+                online,
+                settings,
+                ..
             } => {
                 let (section, tabs) = SECTIONS[self.section];
                 let tab = tabs.get(self.tabs[self.section]).copied();
                 if self.section == DRIVE && self.tabs[DRIVE] == 0 {
                     drive.clone().into_any_element()
+                } else if self.on_servers() {
+                    online.clone().into_any_element()
                 } else if self.section == SETTINGS {
                     settings.clone().into_any_element()
                 } else {
@@ -469,17 +536,11 @@ impl Shell {
             .border_color(rgb(color::BORDER))
             .child(display("Next session", 17.).text_color(rgb(color::ACCENT_TEXT)));
 
-        let Stage::Ready { game, .. } = &self.stage else {
+        let Stage::Ready { game, online, .. } = &self.stage else {
             return bar
                 .child(div().flex_1())
                 .child(launch_button("drive", "Drive").enabled(false));
         };
-        let state = game.read(cx);
-        let session = state.session();
-        let weather = state
-            .library
-            .weather(&session.weather_id)
-            .map_or("", |w| w.name.as_str());
         let item = |name: &str, value: String| {
             div()
                 .flex()
@@ -496,6 +557,50 @@ impl Shell {
                         .child(value),
                 )
         };
+        if self.on_servers() {
+            let screen = online.clone();
+            let Some(summary) = online.read(cx).summary(cx) else {
+                return bar
+                    .child(muted("Choose a server to join."))
+                    .child(div().flex_1())
+                    .child(launch_button("join-bar", "Join").enabled(false));
+            };
+            return bar
+                .child(item("Mode", summary.mode))
+                .child(item("Car", summary.car))
+                .child(item("Track", summary.track))
+                .child(item("Server", summary.server).max_w(px(420.)))
+                .child(div().flex_1())
+                .when_some(
+                    match summary.launch {
+                        Launch::Started => Some(("Starting the game…".into(), color::TEXT_MUTED)),
+                        Launch::Failed(reason) => Some((reason, color::ACCENT_TEXT)),
+                        Launch::Idle => None,
+                    },
+                    |bar, (text, tone): (SharedString, u32)| {
+                        bar.child(
+                            div()
+                                .max_w(px(360.))
+                                .text_size(px(12.5))
+                                .text_color(rgb(tone))
+                                .child(text),
+                        )
+                    },
+                )
+                .child(
+                    launch_button("join-bar", "Join")
+                        .enabled(summary.ready)
+                        .on_click(move |_, _, cx| {
+                            screen.update(cx, |screen, cx| screen.join(cx));
+                        }),
+                );
+        }
+        let state = game.read(cx);
+        let session = state.session();
+        let weather = state
+            .library
+            .weather(&session.weather_id)
+            .map_or("", |w| w.name.as_str());
         let launch = state.launch.clone();
         let game = game.clone();
 
@@ -565,6 +670,7 @@ impl Render for Shell {
             .child(div().flex_1().min_h_0().child(self.content()))
             .child(self.session_bar(cx))
             .children(self.picker.as_ref().map(|(picker, _)| picker.clone()))
+            .children(self.getting.as_ref().map(|(dialog, _)| dialog.clone()))
     }
 }
 

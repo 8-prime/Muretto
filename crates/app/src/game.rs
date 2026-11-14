@@ -22,6 +22,9 @@ pub struct Game {
     pub launch: Launch,
     /// Custom Shaders Patch as last seen in the game folder.
     pub patch: Option<csp::Installed>,
+    /// Goes up whenever the mods in the game folder may have changed, so
+    /// views that read them from disk know when to look again.
+    pub installed_revision: u64,
     session: SessionConfig,
 }
 
@@ -31,6 +34,7 @@ impl Game {
         let session = SessionConfig::first_run(&library)?;
         Some(Self {
             patch: csp::installed(&install),
+            installed_revision: 0,
             install,
             library: Arc::new(library),
             launch: Launch::Idle,
@@ -38,10 +42,11 @@ impl Game {
         })
     }
 
-    /// Looks at the game folder again, after something was installed or
-    /// removed.
-    pub fn refresh_patch(&mut self, cx: &mut Context<Self>) {
+    /// Looks at the game folder again, after something was installed,
+    /// removed or switched.
+    pub fn refresh_installed(&mut self, cx: &mut Context<Self>) {
         self.patch = csp::installed(&self.install);
+        self.installed_revision += 1;
         cx.notify();
     }
 

@@ -6,8 +6,10 @@ pub mod ini;
 pub mod install;
 pub mod launch;
 pub mod lenient;
+pub mod online;
 pub mod packages;
 pub mod session;
+pub mod steam;
 
 pub use content::{Car, Library, Origin, Skin, Track, TrackLayout, Weather};
 pub use install::Install;

@@ -108,6 +108,17 @@ fn dll_overrides(install: &Install, existing: Option<String>) -> Option<String> 
     })
 }
 
+/// Writes `race.ini` from `join` and starts the game, which connects to the
+/// server instead of starting a session of its own.
+pub fn join(install: &Install, join: &crate::online::Join) -> Result<Child> {
+    let cfg = install.cfg_dir();
+    seed_defaults(&install.root.join("cfg"), &cfg)?;
+    write(&cfg.join("race.ini"), &join.race_ini().to_string())?;
+    command(install)?
+        .spawn()
+        .map_err(|e| Error::Launch(format!("Could not start the game: {e}")))
+}
+
 /// Writes the session and starts the game.
 pub fn start(install: &Install, library: &Library, config: &SessionConfig) -> Result<Child> {
     write_session(install, library, config)?;
