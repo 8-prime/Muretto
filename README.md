@@ -10,14 +10,19 @@ The interface follows `docs/design/AC Launcher — UI Design.pdf`.
 | Path | What it is |
 | --- | --- |
 | `crates/core` | Everything about the game that is not interface: finding the install, reading cars, tracks and weather, writing `race.ini`, starting the simulator, and installing packages such as Custom Shaders Patch. No UI dependencies; compiles in seconds. |
+| `crates/dbghelp-shim` | The Proton fix for Custom Shaders Patch: a `dbghelp.dll` that adds the `acs.pdb` symbols Wine's dbghelp leaves out. Built for Windows and checked in at `crates/core/assets/dbghelp.dll`; after changing it, run `cargo make shim` (needs the `x86_64-pc-windows-gnu` target and mingw-w64). |
 | `crates/app` | The window. `theme.rs` holds colours and type, `ui/` the controls, `shell.rs` the frame, `screens/` one file per screen. |
 
 ## Running
 
+Common tasks run through [cargo-make](https://github.com/sagiegurari/cargo-make)
+(`cargo install cargo-make`); `cargo make --list-all-steps` lists them all.
+
 ```sh
-cargo run                                   # the app
-cargo test --workspace                      # core logic and simulated-input UI tests
-cargo run -p muretto-core --example scan    # print what was found on this machine
+cargo make run      # the app
+cargo make test     # core logic and simulated-input UI tests
+cargo make check    # formatting, clippy, tests and the shim check: run before committing
+cargo make scan     # print what was found on this machine
 ```
 
 The game is located through Steam's library folders. Set `MURETTO_AC_ROOT`
@@ -27,9 +32,9 @@ To compare the interface with the design without opening a window, render it
 offscreen to a PNG. Element ids after the path are clicked first:
 
 ```sh
-cargo run -p muretto --features shot --bin shot -- drive.png
-cargo run -p muretto --features shot --bin shot -- cars.png change-car
-cargo run -p muretto --features shot --bin shot -- online.png section:2 wait=4000 input-state "type=drift" server:0
+cargo make shot drive.png
+cargo make shot cars.png change-car
+cargo make shot online.png section:2 wait=4000 input-state "type=drift" server:0
 ```
 
 `wait=<ms>` lets background work such as pings land; `type=<text>` types

@@ -215,13 +215,75 @@ pub fn install_from_file(
 /// installed by other means is only switched off, by deleting its loader:
 /// its `extension` folder may hold other mods that Muretto cannot tell apart.
 pub fn remove(install: &Install) -> Result<()> {
+    remove_proton_fix(install)?;
     if uninstall(&install.root, ID)? {
         return Ok(());
     }
-    let loader = install.root.join(LOADER);
-    match std::fs::remove_file(&loader) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(&loader)(e)),
+    remove_file(&install.root.join(LOADER))
+}
+
+fn remove_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(path)(e)),
         _ => Ok(()),
+    }
+}
+
+/// The patch finds the game's functions by asking dbghelp to list every
+/// symbol in `acs.pdb`. Wine's dbghelp leaves most of them out, so under
+/// Proton the patch stops with "Failed to patch Assetto Corsa: Can't find
+/// ...". The fix is Muretto's own `dbghelp.dll` beside the game, which hands
+/// everything to Wine's and adds the symbols it misses (see the
+/// `muretto-dbghelp-shim` crate). Wine only uses it with the DLL override
+/// that [`crate::launch`] adds.
+const SHIM: &[u8] = include_bytes!("../../assets/dbghelp.dll");
+pub(crate) const SHIM_FILE: &str = "dbghelp.dll";
+/// Compiled into the shim; keep in step with `MARKER` in its `lib.rs`.
+const SHIM_MARKER: &[u8] = b"muretto-dbghelp-shim";
+
+/// Whether the Proton fix is in the game folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtonFix {
+    Absent,
+    Applied,
+    /// An older copy from a previous Muretto version.
+    Outdated,
+    /// A `dbghelp.dll` Muretto did not put there; left alone.
+    Foreign,
+}
+
+pub fn proton_fix(install: &Install) -> ProtonFix {
+    match std::fs::read(install.root.join(SHIM_FILE)) {
+        Err(_) => ProtonFix::Absent,
+        Ok(bytes) if bytes == SHIM => ProtonFix::Applied,
+        Ok(bytes) if is_shim(&bytes) => ProtonFix::Outdated,
+        Ok(_) => ProtonFix::Foreign,
+    }
+}
+
+pub(crate) fn is_shim(bytes: &[u8]) -> bool {
+    bytes.windows(SHIM_MARKER.len()).any(|w| w == SHIM_MARKER)
+}
+
+/// Puts the fix in place, replacing an older copy.
+pub fn apply_proton_fix(install: &Install) -> Result<()> {
+    let target = install.root.join(SHIM_FILE);
+    if proton_fix(install) == ProtonFix::Foreign {
+        return Err(Error::Launch(format!(
+            "{} was not put there by Muretto. Move it away to apply the fix.",
+            target.display()
+        )));
+    }
+    let staging = install.root.join(".muretto-dbghelp.dll");
+    std::fs::write(&staging, SHIM).map_err(io_err(&staging))?;
+    std::fs::rename(&staging, &target).map_err(io_err(&target))
+}
+
+/// Takes the fix out again. A `dbghelp.dll` from elsewhere stays.
+pub fn remove_proton_fix(install: &Install) -> Result<()> {
+    match proton_fix(install) {
+        ProtonFix::Applied | ProtonFix::Outdated => remove_file(&install.root.join(SHIM_FILE)),
+        ProtonFix::Absent | ProtonFix::Foreign => Ok(()),
     }
 }
 
@@ -369,6 +431,50 @@ mod tests {
         assert_eq!(installed(&install), None);
         assert!(install.root.join("extension/weather/pure").is_dir());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_proton_fix_is_applied_updated_and_removed_with_the_patch() {
+        let dir = temp_dir("csp-proton-fix");
+        let install = Install::at(dir.join("steamapps/common/assettocorsa"), None);
+        std::fs::create_dir_all(install.root.join("extension")).unwrap();
+        std::fs::write(install.root.join("dwrite.dll"), "loader").unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Absent);
+
+        apply_proton_fix(&install).unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Applied);
+
+        let mut older = b"MZ older build ".to_vec();
+        older.extend_from_slice(SHIM_MARKER);
+        std::fs::write(install.root.join(SHIM_FILE), older).unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Outdated);
+        apply_proton_fix(&install).unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Applied);
+
+        remove(&install).unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Absent);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_dbghelp_from_elsewhere_is_never_replaced_or_removed() {
+        let dir = temp_dir("csp-proton-foreign");
+        let install = Install::at(dir.join("steamapps/common/assettocorsa"), None);
+        std::fs::create_dir_all(&install.root).unwrap();
+        std::fs::write(install.root.join(SHIM_FILE), "MZ someone else's").unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Foreign);
+        assert!(apply_proton_fix(&install).is_err());
+        remove_proton_fix(&install).unwrap();
+        assert_eq!(
+            std::fs::read(install.root.join(SHIM_FILE)).unwrap(),
+            b"MZ someone else's"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_embedded_shim_carries_its_marker() {
+        assert!(SHIM.starts_with(b"MZ") && is_shim(SHIM));
     }
 
     #[test]

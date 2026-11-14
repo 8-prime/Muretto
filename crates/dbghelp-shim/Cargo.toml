@@ -1,0 +1,14 @@
+[package]
+name = "muretto-dbghelp-shim"
+description = "dbghelp.dll for Custom Shaders Patch under Wine: forwards to Wine's dbghelp and adds the PDB symbols it leaves out of enumerations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dbghelp"
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dependencies]
+pdb = "0.8.0"

@@ -1,0 +1,99 @@
+# Tasks for `cargo make <task>` (https://github.com/sagiegurari/cargo-make).
+# `cargo make --list-all-steps` lists them.
+
+[config]
+default_to_workspace = false
+skip_core_tasks = true
+
+[env]
+SHIM_TARGET = "x86_64-pc-windows-gnu"
+SHIM_BUILT = "${CARGO_MAKE_WORKING_DIRECTORY}/target/x86_64-pc-windows-gnu/release/dbghelp.dll"
+SHIM_EMBEDDED = "${CARGO_MAKE_WORKING_DIRECTORY}/crates/core/assets/dbghelp.dll"
+
+[tasks.default]
+alias = "check"
+
+# --- App ---
+
+[tasks.run]
+description = "Run the app."
+command = "cargo"
+args = ["run", "-p", "muretto", "${@}"]
+
+[tasks.build]
+description = "Build the workspace."
+command = "cargo"
+args = ["build", "--workspace"]
+
+[tasks.release]
+description = "Build the app in release mode."
+command = "cargo"
+args = ["build", "-p", "muretto", "--release"]
+
+[tasks.shot]
+description = "Render the app offscreen to a PNG: cargo make shot out.png [element-id …]"
+command = "cargo"
+args = ["run", "-q", "-p", "muretto", "--features", "shot", "--bin", "shot", "--", "${@}"]
+
+[tasks.scan]
+description = "Print what Muretto finds on this machine."
+command = "cargo"
+args = ["run", "-p", "muretto-core", "--example", "scan"]
+
+# --- Checks ---
+
+[tasks.test]
+description = "Run all tests."
+command = "cargo"
+args = ["test", "--workspace"]
+
+[tasks.fmt]
+description = "Format all code."
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.fmt-check]
+description = "Fail if any code is not formatted."
+command = "cargo"
+args = ["fmt", "--all", "--check"]
+
+[tasks.lint]
+description = "Run clippy over everything, warnings as errors."
+command = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.lint-shim]
+description = "Run clippy over the dbghelp shim as Windows code."
+command = "cargo"
+args = ["clippy", "-p", "muretto-dbghelp-shim", "--target", "${SHIM_TARGET}", "--", "-D", "warnings"]
+
+[tasks.check]
+description = "Formatting, lints and tests: what should pass before a commit."
+dependencies = ["fmt-check", "lint", "lint-shim", "test", "shim-check"]
+
+# --- dbghelp shim (the Proton fix for Custom Shaders Patch) ---
+# Needs `rustup target add x86_64-pc-windows-gnu` and mingw-w64. The built DLL
+# is checked in, so building Muretto itself needs neither.
+
+[tasks.shim-build]
+private = true
+command = "cargo"
+args = ["build", "-p", "muretto-dbghelp-shim", "--release", "--target", "${SHIM_TARGET}"]
+
+[tasks.shim]
+description = "Build the dbghelp shim and copy it to where muretto-core embeds it. Run after any change to crates/dbghelp-shim, cargo fmt included."
+dependencies = ["shim-build"]
+script = '''
+cp "${SHIM_BUILT}" "${SHIM_EMBEDDED}"
+echo "updated crates/core/assets/dbghelp.dll"
+'''
+
+[tasks.shim-check]
+description = "Fail if the checked-in dbghelp.dll is not what the shim source builds."
+dependencies = ["shim-build"]
+script = '''
+if ! cmp -s "${SHIM_BUILT}" "${SHIM_EMBEDDED}"; then
+  echo "crates/core/assets/dbghelp.dll is out of date: run cargo make shim" >&2
+  exit 1
+fi
+'''

@@ -22,6 +22,8 @@ pub struct Game {
     pub launch: Launch,
     /// Custom Shaders Patch as last seen in the game folder.
     pub patch: Option<csp::Installed>,
+    /// Muretto's fix that lets the patch work under Proton.
+    pub proton_fix: csp::ProtonFix,
     /// Goes up whenever the mods in the game folder may have changed, so
     /// views that read them from disk know when to look again.
     pub installed_revision: u64,
@@ -34,6 +36,7 @@ impl Game {
         let session = SessionConfig::first_run(&library)?;
         Some(Self {
             patch: csp::installed(&install),
+            proton_fix: csp::proton_fix(&install),
             installed_revision: 0,
             install,
             library: Arc::new(library),
@@ -46,6 +49,7 @@ impl Game {
     /// removed or switched.
     pub fn refresh_installed(&mut self, cx: &mut Context<Self>) {
         self.patch = csp::installed(&self.install);
+        self.proton_fix = csp::proton_fix(&self.install);
         self.installed_revision += 1;
         cx.notify();
     }

@@ -11,7 +11,7 @@ use muretto_core::{
     install::Runtime,
     packages::{
         Progress,
-        csp::{self, Catalogue, Installed, Release, Standing, version_key},
+        csp::{self, Catalogue, Installed, ProtonFix, Release, Standing, version_key},
     },
 };
 
@@ -393,6 +393,86 @@ impl PatchPage {
             })
     }
 
+    fn set_proton_fix(&mut self, apply: bool, cx: &mut Context<Self>) {
+        let install = self.game.read(cx).install.clone();
+        let result = match apply {
+            true => csp::apply_proton_fix(&install),
+            false => csp::remove_proton_fix(&install),
+        };
+        self.error = result.err().map(|e| e.to_string().into());
+        self.game.update(cx, |game, cx| game.refresh_installed(cx));
+        cx.notify();
+    }
+
+    /// Under Proton the patch cannot find the game's functions without
+    /// Muretto's dbghelp; offered whenever the patch is installed.
+    fn proton_fix(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let game = self.game.read(cx);
+        if !matches!(game.install.runtime, Runtime::Proton { .. }) || game.patch.is_none() {
+            return None;
+        }
+        let (label, tone, text, action) = match game.proton_fix {
+            ProtonFix::Absent => (
+                "NOT APPLIED",
+                color::WARN,
+                "Under Proton the patch cannot find the game's functions and stops with \u{201c}Failed to patch Assetto Corsa\u{201d}. The fix puts a small dbghelp.dll beside the game that gives the patch what it looks for.",
+                Some(("Apply fix", true)),
+            ),
+            ProtonFix::Applied => (
+                "APPLIED",
+                color::GOOD,
+                "The patch gets the game's functions from Muretto's dbghelp.dll. It is used whenever Muretto starts the game.",
+                Some(("Remove fix", false)),
+            ),
+            ProtonFix::Outdated => (
+                "UPDATE",
+                color::ACCENT_TEXT,
+                "The dbghelp.dll in the game folder comes from an earlier version of Muretto.",
+                Some(("Update fix", true)),
+            ),
+            ProtonFix::Foreign => (
+                "BLOCKED",
+                color::WARN,
+                "There is a dbghelp.dll in the game folder that Muretto did not put there. Move it away to apply the fix.",
+                None,
+            ),
+        };
+        let idle = self.job.is_none();
+        Some(
+            panel("Proton fix").child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(GAP)
+                    .p(px(16.))
+                    .child(
+                        tracked(label, px(10.), 0.12)
+                            .w(px(96.))
+                            .flex_none()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(tone)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .line_height(relative(1.5))
+                            .child(text),
+                    )
+                    .when_some(action.filter(|_| idle), |row, (verb, apply)| {
+                        row.child(
+                            button("patch-proton-fix", verb)
+                                .when(apply, |button| button.light())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_proton_fix(apply, cx)
+                                })),
+                        )
+                    }),
+            ),
+        )
+    }
+
     fn notes(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let proton = matches!(self.game.read(cx).install.runtime, Runtime::Proton { .. });
         let note = |title: &str, text: &str| {
@@ -422,7 +502,7 @@ impl PatchPage {
                 .when(proton, |notes| {
                     notes.child(note(
                         "Running under Proton",
-                        "The patch loads through a DLL override that Muretto adds whenever it starts the game. Started from Steam directly, the game runs without the patch.",
+                        "The patch, and the Proton fix that lets it find the game's functions, load through DLL overrides that Muretto adds whenever it starts the game. Started from Steam directly, the game runs without them.",
                     ))
                 })
                 .child(note(
@@ -511,6 +591,7 @@ impl Render for PatchPage {
                     ("Recommended", or_dash(recommended)),
                     ("Newest", or_dash(newest)),
                 ]))
+                .children(self.proton_fix(cx))
                 .child(
                     div()
                         .flex()

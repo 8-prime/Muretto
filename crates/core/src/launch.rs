@@ -10,6 +10,7 @@ use crate::{
     Error, Install, Library, Result, SessionConfig,
     install::{Runtime, STEAM_APP_ID},
     io_err,
+    packages::csp,
 };
 
 /// Writes `race.ini` and `assists.ini` for `config` into the game's settings
@@ -95,16 +96,26 @@ pub fn command(install: &Install) -> Result<Command> {
     Ok(command)
 }
 
-/// Wine prefers its own `dwrite.dll` to one beside the executable, which is
-/// how Custom Shaders Patch loads. When the patch is installed, tell Wine to
-/// use the game's copy, keeping any overrides the player already set.
+/// Wine prefers its own DLLs to ones beside the executable. Custom Shaders
+/// Patch loads as the game's `dwrite.dll`, and Muretto's fix for it under
+/// Proton is a `dbghelp.dll` there too (see [`csp::apply_proton_fix`]): tell
+/// Wine to use the game's copies, keeping any overrides the player already set.
 fn dll_overrides(install: &Install, existing: Option<String>) -> Option<String> {
-    if !install.root.join("dwrite.dll").is_file() {
+    let mut ours = Vec::new();
+    if install.root.join("dwrite.dll").is_file() {
+        ours.push("dwrite=n,b");
+    }
+    let shim = std::fs::read(install.root.join(csp::SHIM_FILE)).ok();
+    if shim.is_some_and(|bytes| csp::is_shim(&bytes)) {
+        ours.push("dbghelp=n,b");
+    }
+    if ours.is_empty() {
         return None;
     }
+    let ours = ours.join(";");
     Some(match existing.filter(|value| !value.is_empty()) {
-        Some(existing) => format!("{existing};dwrite=n,b"),
-        None => "dwrite=n,b".to_owned(),
+        Some(existing) => format!("{existing};{ours}"),
+        None => ours,
     })
 }
 
@@ -199,6 +210,17 @@ mod tests {
         assert_eq!(
             dll_overrides(&install, Some("dxgi=b".to_owned())).as_deref(),
             Some("dxgi=b;dwrite=n,b")
+        );
+
+        // A dbghelp.dll of unknown origin is left to Wine's judgement; the
+        // Proton fix is preferred to Wine's own.
+        std::fs::write(root.join("dbghelp.dll"), "MZ other").unwrap();
+        assert_eq!(dll_overrides(&install, None).as_deref(), Some("dwrite=n,b"));
+        std::fs::remove_file(root.join("dbghelp.dll")).unwrap();
+        csp::apply_proton_fix(&install).unwrap();
+        assert_eq!(
+            dll_overrides(&install, None).as_deref(),
+            Some("dwrite=n,b;dbghelp=n,b")
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
