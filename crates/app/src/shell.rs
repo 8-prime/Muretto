@@ -10,6 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use muretto_core::{
     Install, Library,
+    group::{self, Groups, WebSocketRelay},
     online::{self, saved::Saved},
     packages::csp,
     session::format_time,
@@ -20,6 +21,7 @@ use crate::{
     game::{Game, Launch},
     screens::{
         drive::{DriveEvent, DriveScreen},
+        friends::GroupSetup,
         get_mod::{GetDialog, GetEvent},
         online::{OnlineScreen, Tab},
         picker::{Picker, PickerEvent, PickerItem},
@@ -53,7 +55,10 @@ const SECTIONS: [(&str, &[&str]); 5] = [
         ],
     ),
     // In the order of `online::Tab::ALL`.
-    ("Online", &["All servers", "Favourites", "Recent", "LAN"]),
+    (
+        "Online",
+        &["All servers", "Favourites", "Recent", "LAN", "Friends"],
+    ),
     (
         "Results",
         &[
@@ -86,6 +91,10 @@ pub struct Sources {
     pub servers: Arc<dyn online::Source>,
     /// Favourite and recent servers; kept nowhere when `None`.
     pub saved_servers: Option<PathBuf>,
+    /// The groups the player is in; kept nowhere when `None`.
+    pub saved_groups: Option<PathBuf>,
+    /// The group server; `None` reaches the one the settings name.
+    pub group_relay: Option<Arc<dyn group::Relay>>,
 }
 
 impl Sources {
@@ -94,6 +103,8 @@ impl Sources {
             patches: Arc::new(csp::Official),
             servers: Arc::new(online::Official),
             saved_servers: Saved::default_path(),
+            saved_groups: Groups::default_path(),
+            group_relay: None,
         }
     }
 }
@@ -245,8 +256,14 @@ impl Shell {
         let drive = cx.new(|cx| DriveScreen::new(game.clone(), window, cx));
         let settings = cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, window, cx));
         let saved = Saved::load(sources.saved_servers);
-        let online =
-            cx.new(|cx| OnlineScreen::new(game.clone(), sources.servers, saved, window, cx));
+        let kept = Groups::load(sources.saved_groups);
+        let relay = sources.group_relay.or_else(|| {
+            kept.server_url()
+                .map(|url| Arc::new(WebSocketRelay::new(url)) as Arc<dyn group::Relay>)
+        });
+        let groups = GroupSetup { kept, relay };
+        let online = cx
+            .new(|cx| OnlineScreen::new(game.clone(), sources.servers, saved, groups, window, cx));
         self._subscriptions = vec![
             cx.observe(&game, |_, _, cx| cx.notify()),
             // The bottom bar shows the chosen server.

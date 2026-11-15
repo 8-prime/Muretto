@@ -67,6 +67,9 @@ fn main() {
                 .expect("the window draws");
             cx.run_until_parked();
             std::thread::sleep(Duration::from_millis(40));
+            // The headless app runs on a test clock that stands still; keep
+            // it with real time so timers (group news, job progress) fire.
+            cx.advance_clock(Duration::from_millis(40));
         }
     };
     settle(&mut cx);

@@ -11,6 +11,8 @@ The interface follows `docs/design/AC Launcher — UI Design.pdf`.
 | --- | --- |
 | `crates/core` | Everything about the game that is not interface: finding the install, reading cars, tracks and weather, writing `race.ini`, starting the simulator, and installing packages such as Custom Shaders Patch. No UI dependencies; compiles in seconds. |
 | `crates/dbghelp-shim` | The Proton fix for Custom Shaders Patch: a `dbghelp.dll` that adds the `acs.pdb` symbols Wine's dbghelp leaves out. Built for Windows and checked in at `crates/core/assets/dbghelp.dll`; after changing it, run `cargo make shim` (needs the `x86_64-pc-windows-gnu` target and mingw-w64). |
+| `crates/group-protocol` | What Muretto and the group server say to each other, and how the server keeps its rooms. |
+| `crates/group-server` | The server friends' groups meet on (see [Groups](#groups)). Not part of the app build. |
 | `crates/app` | The window. `theme.rs` holds colours and type, `ui/` the controls, `shell.rs` the frame, `screens/` one file per screen. |
 
 ## Running
@@ -63,6 +65,38 @@ MediaFire). Every car and track found in the archive or folder goes into
 
 Favourite and recently joined servers are kept outside the game folder, in
 `servers.json` in Muretto's settings folder (`~/.config/muretto` on Linux).
+
+## Groups
+
+Online's Friends tab shows which server each friend has open, opens the same
+one with a click, and can follow a friend so their choice becomes yours.
+Someone starts a group and sends its code (six groups of four letters and
+digits); everyone who pastes it is in. Codes are kept in `groups.json` in
+Muretto's settings folder, and Muretto rejoins them whenever it starts.
+
+Groups meet on a small server that only relays: the room is a hash of the
+code, and each member's state (a random install id, the Steam name, and the
+`ip:http-port` of the open server) is sealed with a key derived from the code
+(ChaCha20-Poly1305), so the server reads neither. Muretto uses the server
+named by `MURETTO_GROUP_SERVER`, else `"server"` in `groups.json`, else
+`wss://muretto.8-prime.dev` (`group::DEFAULT_SERVER`).
+
+```sh
+cargo run -p muretto-group-server                     # ws://127.0.0.1:3100
+docker build -f crates/group-server/Dockerfile -t muretto-group-server .
+```
+
+`GROUP_ADDR` sets where it listens and `GROUP_MAX_CONNECTIONS` caps
+connections (4096). Run it behind TLS that forwards WebSocket upgrades on
+`/v1/`. Rooms hold 16 members; a member may send 20 messages in a burst and 5
+a second after that.
+
+To be a second member without a second machine, join as a pretend friend;
+each line typed is a server to have open:
+
+```sh
+cargo run -p muretto-core --example group_friend -- ws://127.0.0.1:3100 <code> Alex 10.0.0.1:8081
+```
 
 To try an install against the real download without touching the game:
 

@@ -1,0 +1,18 @@
+[package]
+name = "muretto-group-server"
+description = "The server friends' Muretto groups meet on. It relays encrypted state it cannot read."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+muretto-group-protocol = { path = "../group-protocol" }
+axum = { version = "0.8.9", features = ["ws"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# Muretto's own client, run against the server end to end.
+muretto-core.workspace = true
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

@@ -21,6 +21,7 @@ use muretto::{
 };
 use muretto_core::{
     Error, Install, Library,
+    group::{Code, Event, Group, Groups, Presence, Status, Viewed, relay::Memory},
     online::{
         self, Column, Facet, Found, Lobby, Server, Slot,
         offers::{Kind, Offer},
@@ -277,6 +278,18 @@ fn open_with(
     patches: Shelf,
     servers: Paddock,
 ) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
+    open_with_groups(cx, root, patches, servers, Memory::default())
+}
+
+/// Opens Muretto with its groups meeting on `groups`, a group server in
+/// memory that a test can also join as a friend.
+fn open_with_groups(
+    cx: &mut TestAppContext,
+    root: &Path,
+    patches: Shelf,
+    servers: Paddock,
+    groups: Memory,
+) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
     let install = Install::at(root.to_path_buf(), None);
     let library = Library::scan(&install);
     assert_eq!((library.cars.len(), library.tracks.len()), (3, 2));
@@ -297,6 +310,8 @@ fn open_with(
                     servers: Arc::new(servers),
                     // Beside the game folder, so each test keeps its own.
                     saved_servers: Some(saved_servers(root)),
+                    saved_groups: Some(saved_groups(root)),
+                    group_relay: Some(Arc::new(groups)),
                 };
                 cx.new(|cx| Shell::with_content(install, library, sources, window, cx))
             },
@@ -313,6 +328,10 @@ fn open_with(
 
 fn saved_servers(root: &Path) -> PathBuf {
     root.parent().unwrap().join("servers.json")
+}
+
+fn saved_groups(root: &Path) -> PathBuf {
+    root.parent().unwrap().join("groups.json")
 }
 
 /// One user action, followed by everything it sets in motion. Events a view
@@ -919,6 +938,170 @@ fn servers_are_sorted_starred_found_on_the_network_and_completed(cx: &mut TestAp
         assert!(online.dialog().is_none());
         assert!(online.selected().unwrap().track_installed);
     });
+}
+
+/// Lets threads and what they set in motion run until `done` holds.
+fn settle_until(cx: &mut TestAppContext, what: &str, done: impl Fn(&mut TestAppContext) -> bool) {
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !done(cx) {
+        assert!(
+            std::time::Instant::now() < until,
+            "timed out waiting for {what}"
+        );
+        settle(cx);
+    }
+}
+
+#[gpui_kit::test]
+fn friends_in_a_group_open_and_follow_each_other_s_server(cx: &mut TestAppContext) {
+    let root = game_folder("friends");
+    let _ = std::fs::remove_file(saved_groups(&root));
+    let memory = Memory::default();
+    let (window, _, shell) = open_with_groups(
+        cx,
+        &root,
+        Shelf { online: true },
+        Paddock::default(),
+        memory.clone(),
+    );
+    act(cx, window, |window, cx| {
+        window.click(("section", 2usize), cx)
+    });
+    settle(cx);
+    let online = cx.update(|cx| shell.read(cx).online().unwrap().clone());
+    act(cx, window, |window, cx| window.click(("tab", 4usize), cx));
+    act(cx, window, |window, cx| window.click("group-start", cx));
+    let code = cx.update(|cx| online.read(cx).friends().codes())[0].clone();
+    settle_until(cx, "the group to connect", |cx| {
+        cx.update(|cx| online.read(cx).friends().status(&code) == Some(&Status::Connected))
+    });
+
+    // A friend joins with the code and has Ring Cruise open.
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Presence>::new()));
+    let alex = Group::join(
+        Arc::new(memory.clone()),
+        Code::parse(&code).unwrap(),
+        Presence {
+            device: "alex".into(),
+            name: "Alex".into(),
+            viewing: Some(Viewed {
+                ip: "10.0.0.2".into(),
+                http_port: 8081,
+            }),
+        },
+        {
+            let seen = seen.clone();
+            move |event| {
+                if let Event::Members(members) = event {
+                    *seen.lock().unwrap() = members.into_iter().map(|m| m.presence).collect();
+                }
+            }
+        },
+    );
+    settle_until(cx, "the friend", |cx| {
+        cx.update(|cx| online.read(cx).friends().online() == 1)
+    });
+    // The friend sees this player, with nothing open yet.
+    let player = |seen: &[Presence]| seen.first().map(|p| (p.name.clone(), p.viewing.clone()));
+    assert_eq!(
+        player(&seen.lock().unwrap()),
+        Some(("L. Brandt".into(), None))
+    );
+
+    // Opening the friend's server shows it, and the friend learns of it.
+    act(cx, window, |window, cx| {
+        window.click(("friend-jump", 0usize), cx)
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            online.read(cx).selected().unwrap().server.name,
+            "Ring Cruise"
+        )
+    });
+    let ring = Some(Viewed {
+        ip: "10.0.0.2".into(),
+        http_port: 8081,
+    });
+    settle_until(cx, "the friend to see Ring Cruise", |_| {
+        player(&seen.lock().unwrap()) == Some(("L. Brandt".into(), ring.clone()))
+    });
+
+    // Following: the friend moves to a server the lobby does not list; it is
+    // asked directly and opened.
+    act(cx, window, |window, cx| {
+        window.click(("friend-follow", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(online.read(cx).friends().following(), Some("alex")));
+    alex.tell(Presence {
+        device: "alex".into(),
+        name: "Alex".into(),
+        viewing: Some(Viewed {
+            ip: "10.0.0.9".into(),
+            http_port: 8081,
+        }),
+    });
+    settle_until(cx, "the followed server", |cx| {
+        cx.update(|cx| {
+            online
+                .read(cx)
+                .selected()
+                .is_some_and(|listed| listed.server.name == "Garage")
+        })
+    });
+    cx.update(|cx| {
+        assert_eq!(
+            online.read(cx).selected().unwrap().server.found,
+            Found::Direct
+        )
+    });
+
+    // Picking a server by hand ends following.
+    act(cx, window, |window, cx| window.click(("tab", 0usize), cx));
+    act(cx, window, |window, cx| {
+        window.click(("server", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(online.read(cx).friends().following(), None));
+
+    // The group is kept: Muretto opened again rejoins it by itself.
+    assert_eq!(Groups::load(Some(saved_groups(&root))).groups.len(), 1);
+    assert_eq!(memory.members(), 2);
+    let (_, _, again) = open_with_groups(
+        cx,
+        &root,
+        Shelf { online: true },
+        Paddock::default(),
+        memory.clone(),
+    );
+    settle_until(cx, "the second window to rejoin", |_| memory.members() == 3);
+    cx.update(|cx| {
+        let online = again.read(cx).online().unwrap().read(cx);
+        assert_eq!(online.friends().codes(), std::slice::from_ref(&code));
+    });
+
+    // A code that is not one is refused; one already kept changes nothing.
+    cx.update(|cx| {
+        online.update(cx, |online, cx| {
+            assert!(!online.join_code("not a code", cx));
+            assert!(online.join_code(&code.to_lowercase(), cx));
+            assert_eq!(online.friends().codes().len(), 1);
+        })
+    });
+
+    // Leaving asks once, then forgets the code.
+    act(cx, window, |window, cx| window.click(("tab", 4usize), cx));
+    act(cx, window, |window, cx| {
+        window.click(("group-leave", 0usize), cx)
+    });
+    cx.update(|cx| assert_eq!(online.read(cx).friends().codes().len(), 1));
+    act(cx, window, |window, cx| {
+        window.click(("group-leave", 0usize), cx)
+    });
+    cx.update(|cx| assert!(online.read(cx).friends().codes().is_empty()));
+    assert!(Groups::load(Some(saved_groups(&root))).groups.is_empty());
+    settle_until(cx, "the first window to leave the room", |_| {
+        memory.members() == 2
+    });
+    drop(alex);
 }
 
 const CONTROLS_PAGE: (&str, usize) = ("Assetto Corsa", 2);

@@ -3,6 +3,7 @@
 
 pub mod content;
 pub mod country;
+pub mod group;
 pub mod ini;
 pub mod install;
 pub mod launch;

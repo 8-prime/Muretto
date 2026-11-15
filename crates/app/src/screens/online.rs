@@ -38,6 +38,7 @@ use crate::{
     job::Job,
     screens::{
         facet_picker::{FacetEvent, FacetPicker},
+        friends::{Friends, GroupSetup},
         get_content::{ContentDialog, ContentEvent, added_text},
     },
     theme::{PAGE, RADIUS, color, font, hsla},
@@ -51,10 +52,17 @@ pub enum Tab {
     Favourites,
     Recent,
     Lan,
+    Friends,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::All, Tab::Favourites, Tab::Recent, Tab::Lan];
+    pub const ALL: [Tab; 5] = [
+        Tab::All,
+        Tab::Favourites,
+        Tab::Recent,
+        Tab::Lan,
+        Tab::Friends,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -62,6 +70,7 @@ impl Tab {
             Tab::Favourites => "Favourites",
             Tab::Recent => "Recent",
             Tab::Lan => "LAN",
+            Tab::Friends => "Friends",
         }
     }
 }
@@ -107,7 +116,7 @@ pub struct Summary {
 
 pub struct OnlineScreen {
     game: Entity<Game>,
-    source: Arc<dyn online::Source>,
+    pub(super) source: Arc<dyn online::Source>,
     load: Load,
     player: Option<SteamUser>,
     saved: Saved,
@@ -153,6 +162,8 @@ pub struct OnlineScreen {
     password: Entity<InputState>,
     picker: Option<(Entity<FacetPicker>, Subscription)>,
     dialog: Option<(Entity<ContentDialog>, Subscription)>,
+    /// The player's groups, on the Friends tab.
+    pub(super) friends: Friends,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -170,6 +181,7 @@ impl OnlineScreen {
         game: Entity<Game>,
         source: Arc<dyn online::Source>,
         saved: Saved,
+        groups: GroupSetup,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -198,7 +210,8 @@ impl OnlineScreen {
         ];
         let listed_library = game.read(cx).library.clone();
         let flags = Flags::scan(&game.read(cx).install);
-        Self {
+        let friends = Friends::new(groups, window, cx);
+        let mut screen = Self {
             game,
             source,
             load: Load::Idle,
@@ -231,8 +244,37 @@ impl OnlineScreen {
             password,
             picker: None,
             dialog: None,
+            friends,
             _subscriptions,
-        }
+        };
+        screen.start_groups(cx);
+        screen
+    }
+
+    pub fn friends(&self) -> &Friends {
+        &self.friends
+    }
+
+    /// Where in the listing the server at `address` (`ip:http-port`) is.
+    pub(super) fn index_of(&self, address: &str) -> Option<usize> {
+        self.listing
+            .servers
+            .iter()
+            .position(|listed| listed.server.address() == address)
+    }
+
+    /// Lists a server that was asked directly.
+    pub(super) fn add_server(&mut self, server: Server, cx: &mut Context<Self>) {
+        let servers = Arc::make_mut(&mut self.servers);
+        servers.retain(|known| known.address() != server.address());
+        servers.push(server);
+        self.relist(cx);
+    }
+
+    /// Works out the tab's servers again, as when what it holds changed.
+    pub(super) fn rescope(&mut self) {
+        self.filter.scope = self.scope();
+        self.refilter();
     }
 
     /// Called whenever the screen is shown; reads the lobby the first time,
@@ -267,6 +309,7 @@ impl OnlineScreen {
             Tab::Favourites => addresses(&self.saved.favourites),
             Tab::Recent => addresses(&self.saved.recent),
             Tab::Lan => Scope::Lan,
+            Tab::Friends => Scope::Kept(self.friends.viewed().into_iter().collect()),
         }
     }
 
@@ -282,6 +325,7 @@ impl OnlineScreen {
             Tab::Favourites => Some(self.saved.favourites.len()),
             Tab::Recent => Some(self.saved.recent.len()),
             Tab::Lan => matches!(self.lan, Lan::Searched).then_some(self.lan_servers.len()),
+            Tab::Friends => self.friends.has_groups().then(|| self.friends.online()),
         }
     }
 
@@ -401,6 +445,7 @@ impl OnlineScreen {
                         this.servers = Arc::new(servers);
                         this.show_listing(listing, library);
                         this.load = Load::Ready;
+                        this.listed_jump(cx);
                         this.start_pinging(targets, cx);
                     }
                     Err(error) => {
@@ -463,6 +508,7 @@ impl OnlineScreen {
             let (listing, library) = listing.await;
             this.update(cx, |this, cx| {
                 this.show_listing(listing, library);
+                this.listed_jump(cx);
                 cx.notify();
             })
             .ok();
@@ -492,6 +538,8 @@ impl OnlineScreen {
         }
         self.index_pings();
         self.refilter();
+        // The server this player had open may have gone from the list.
+        self.tell_groups();
     }
 
     /// Pings the servers in the background and shows each answer as it
@@ -632,6 +680,7 @@ impl OnlineScreen {
             return;
         }
         self.selected = Some(index);
+        self.tell_groups();
         self.slots = Some(Slots::Loading);
         self.offers = None;
         self.fetched = None;
@@ -1299,7 +1348,10 @@ impl OnlineScreen {
                     row.hover(|style| style.bg(rgb(color::RAISED)))
                 }
             })
-            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.stop_following();
+                this.select(index, cx)
+            }))
             .child(
                 div()
                     .id(("star", row))
@@ -2192,6 +2244,13 @@ impl OnlineScreen {
 impl Render for OnlineScreen {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let root = div().id("online").relative().flex().size_full();
+        if self.tab == Tab::Friends {
+            return root
+                .child(self.friends_panel(cx))
+                .child(self.detail(cx))
+                .children(self.picker.as_ref().map(|(picker, _)| picker.clone()))
+                .children(self.dialog.as_ref().map(|(dialog, _)| dialog.clone()));
+        }
         match &self.load {
             _ if self.tab == Tab::Lan => {}
             Load::Idle | Load::Loading if self.listing.servers.is_empty() => {
@@ -2257,6 +2316,7 @@ impl OnlineScreen {
             Tab::Lan => {
                 "No server answered on this network. Servers set up for a LAN answer on ports 9456–9458, 9556, 9600–9612 or 9700."
             }
+            Tab::Friends => "None of your friends has a server open.",
         }
     }
 

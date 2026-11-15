@@ -1,0 +1,10 @@
+[package]
+name = "muretto-group-protocol"
+description = "What Muretto and its group server say to each other, and how the server keeps its rooms."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
