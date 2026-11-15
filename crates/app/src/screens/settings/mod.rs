@@ -1,5 +1,6 @@
 //! Settings: a list of pages on the left, the chosen page on the right.
 
+mod about;
 mod controls;
 mod form;
 mod page;
@@ -63,13 +64,14 @@ const GROUPS: [(&str, &[&str]); 3] = [
             "Game and content folders",
             "Runtime",
             "Integrations",
-            "About and updates",
+            ABOUT_PAGE,
         ],
     ),
 ];
 const PATCH_GROUP: &str = "Custom Shaders Patch";
 const PATCH_PAGE: &str = "Versions and updates";
 const WEATHER_PAGE: &str = "Weather FX";
+const ABOUT_PAGE: &str = "About and updates";
 
 /// Requests the screen cannot fulfil itself because they cover the window.
 pub enum SettingsEvent {
@@ -167,6 +169,7 @@ impl SettingsScreen {
         let words: &[&str] = match page {
             PATCH_PAGE => &["Custom Shaders Patch", "CSP", "Install", "Update", "Proton"],
             WEATHER_PAGE => &["Weather", "Sky", "Clouds", "Pure", "Sol"],
+            ABOUT_PAGE => &["Version", "Release"],
             _ => &[],
         };
         words.iter().map(|w| SharedString::from(*w)).collect()
@@ -304,6 +307,7 @@ impl Render for SettingsScreen {
             PATCH_PAGE => self.patch.clone().into_any_element(),
             WEATHER_PAGE => self.weather.clone().into_any_element(),
             CONTROLS_PAGE => self.controls.clone().into_any_element(),
+            ABOUT_PAGE => about::about_page().into_any_element(),
             other if let Some((_, view)) = self.config_pages.iter().find(|(n, _)| *n == other) => {
                 view.clone().into_any_element()
             }

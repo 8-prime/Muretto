@@ -1,0 +1,86 @@
+# Builds Muretto for Linux and Windows when a version tag is pushed, and
+# attaches both to a draft GitHub release to look over and publish.
+#
+# Linux builds on the oldest supported Ubuntu so the binary runs on older
+# glibc too. Windows must build on Windows: gpui compiles its shaders with
+# the SDK's fxc.exe only on a Windows host.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libx11-xcb-dev libwayland-dev libvulkan-dev \
+            libfontconfig-dev libasound2-dev
+
+      - name: Build
+        run: cargo build -p muretto --release --locked
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          version=$(cargo pkgid -p muretto | sed 's/.*[#@]//')
+          dir="muretto-$version-${{ matrix.name }}"
+          mkdir "$dir"
+          cp target/release/muretto README.md "$dir/"
+          tar -czf "$dir.tar.gz" "$dir"
+          echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (cargo pkgid -p muretto) -replace '.*[#@]', ''
+          $dir = "muretto-$version-${{ matrix.name }}"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/release/muretto.exe, README.md $dir
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "ASSET=$dir.zip" | Out-File -Append $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            *.tar.gz
+            *.zip
