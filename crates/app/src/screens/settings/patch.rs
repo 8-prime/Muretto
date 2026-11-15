@@ -394,18 +394,40 @@ impl PatchPage {
     }
 
     fn set_proton_fix(&mut self, apply: bool, cx: &mut Context<Self>) {
+        if self.job.is_some() {
+            return;
+        }
+        self.error = None;
         let install = self.game.read(cx).install.clone();
-        let result = match apply {
-            true => csp::apply_proton_fix(&install),
-            false => csp::remove_proton_fix(&install),
-        };
-        self.error = result.err().map(|e| e.to_string().into());
-        self.game.update(cx, |game, cx| game.refresh_installed(cx));
+        if !apply {
+            self.error = csp::remove_proton_fix(&install)
+                .err()
+                .map(|e| e.to_string().into());
+            self.game.update(cx, |game, cx| game.refresh_installed(cx));
+            cx.notify();
+            return;
+        }
+        // The shader compiler is a download; it runs like an installation.
+        self.job = Some(Job::start(
+            "Proton fix",
+            install,
+            cx,
+            csp::apply_proton_fix,
+            |this, result, cx| {
+                this.job = None;
+                match result {
+                    Ok(()) | Err(Error::Cancelled) => {}
+                    Err(error) => this.error = Some(error.to_string().into()),
+                }
+                this.game.update(cx, |game, cx| game.refresh_installed(cx));
+            },
+        ));
         cx.notify();
     }
 
     /// Under Proton the patch cannot find the game's functions without
-    /// Muretto's dbghelp; offered whenever the patch is installed.
+    /// Muretto's dbghelp, and Weather FX renders almost black without
+    /// Microsoft's shader compiler; offered whenever the patch is installed.
     fn proton_fix(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let game = self.game.read(cx);
         if !matches!(game.install.runtime, Runtime::Proton { .. }) || game.patch.is_none() {
@@ -415,14 +437,20 @@ impl PatchPage {
             ProtonFix::Absent => (
                 "NOT APPLIED",
                 color::WARN,
-                "Under Proton the patch cannot find the game's functions and stops with \u{201c}Failed to patch Assetto Corsa\u{201d}. The fix puts a small dbghelp.dll beside the game that gives the patch what it looks for.",
+                "Under Proton the patch cannot find the game's functions and stops with \u{201c}Failed to patch Assetto Corsa\u{201d}, and Weather FX draws an almost black picture. The fix puts a small dbghelp.dll beside the game, plus Microsoft's shader compiler, taken from an old Firefox installer (a 40 MB download).",
                 Some(("Apply fix", true)),
             ),
             ProtonFix::Applied => (
                 "APPLIED",
                 color::GOOD,
-                "The patch gets the game's functions from Muretto's dbghelp.dll. It is used whenever Muretto starts the game.",
+                "The patch gets the game's functions from Muretto's dbghelp.dll and compiles its shaders with Microsoft's compiler. Both are used whenever Muretto starts the game.",
                 Some(("Remove fix", false)),
+            ),
+            ProtonFix::Incomplete => (
+                "INCOMPLETE",
+                color::WARN,
+                "The fix lacks Microsoft's shader compiler, which Weather FX needs to draw a normal picture under Proton. Completing it downloads an old Firefox installer (40 MB) and takes the compiler from it.",
+                Some(("Complete fix", true)),
             ),
             ProtonFix::Outdated => (
                 "UPDATE",

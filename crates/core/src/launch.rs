@@ -113,14 +113,58 @@ pub fn command(install: &Install) -> Result<Command> {
     Ok(command)
 }
 
+/// Refuses to start under Proton while Steam is known not to be running.
+fn require_steam(install: &Install) -> Result<()> {
+    if matches!(install.runtime, Runtime::Proton { .. }) && steam_stopped() {
+        return Err(Error::Launch(
+            "Steam is not running. Start Steam, then try again.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether Steam is known not to be running. Started without it, the game
+/// has Steam start from inside Proton, and Proton then waits on that Steam
+/// instead of the game: the start never seems to end.
+fn steam_stopped() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let pid_files = [
+        home.join(".steam/steam.pid"),
+        home.join(".var/app/com.valvesoftware.Steam/.steam/steam.pid"),
+    ];
+    let pids: Vec<String> = pid_files
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .map(|pid| pid.trim().to_owned())
+        .filter(|pid| !pid.is_empty())
+        .collect();
+    // No record at all: the client may live somewhere unusual; let it be.
+    !pids.is_empty() && !pids.iter().any(|pid| steam_process(pid))
+}
+
+/// Whether `pid` is a live Steam client process.
+fn steam_process(pid: &str) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|cmdline| cmdline.windows(5).any(|w| w.eq_ignore_ascii_case(b"steam")))
+}
+
 /// Wine prefers its own DLLs to ones beside the executable. Custom Shaders
-/// Patch loads as the game's `dwrite.dll`, and Muretto's fix for it under
+/// Patch loads as the game's `dwrite.dll` and compiles shaders with
+/// `d3dcompiler_47.dll`, and Muretto's fix for it under
 /// Proton is a `dbghelp.dll` there too (see [`csp::apply_proton_fix`]): tell
 /// Wine to use the game's copies, keeping any overrides the player already set.
 fn dll_overrides(install: &Install, existing: Option<String>) -> Option<String> {
     let mut ours = Vec::new();
     if install.root.join("dwrite.dll").is_file() {
         ours.push("dwrite=n,b");
+    }
+    // Wine's own shader compiler fails on the patch's includes, which leaves
+    // Weather FX's linear colour space without its final pass: an almost
+    // black picture. Microsoft's compiler beside the game avoids that.
+    if install.root.join("d3dcompiler_47.dll").is_file() {
+        ours.push("d3dcompiler_47=n,b");
     }
     let shim = std::fs::read(install.root.join(csp::SHIM_FILE)).ok();
     if shim.is_some_and(|bytes| csp::is_shim(&bytes)) {
@@ -139,6 +183,7 @@ fn dll_overrides(install: &Install, existing: Option<String>) -> Option<String> 
 /// Writes `race.ini` from `join` and starts the game, which connects to the
 /// server instead of starting a session of its own.
 pub fn join(install: &Install, join: &crate::online::Join) -> Result<Child> {
+    require_steam(install)?;
     prepare(install)?;
     let cfg = install.cfg_dir();
     write(&cfg.join("race.ini"), &join.race_ini().to_string())?;
@@ -149,6 +194,7 @@ pub fn join(install: &Install, join: &crate::online::Join) -> Result<Child> {
 
 /// Writes the session and starts the game.
 pub fn start(install: &Install, library: &Library, config: &SessionConfig) -> Result<Child> {
+    require_steam(install)?;
     write_session(install, library, config)?;
     let mut command = command(install)?;
     command
@@ -270,10 +316,15 @@ mod tests {
         std::fs::write(root.join("dbghelp.dll"), "MZ other").unwrap();
         assert_eq!(dll_overrides(&install, None).as_deref(), Some("dwrite=n,b"));
         std::fs::remove_file(root.join("dbghelp.dll")).unwrap();
-        csp::apply_proton_fix(&install).unwrap();
+        csp::apply_shim(&install).unwrap();
         assert_eq!(
             dll_overrides(&install, None).as_deref(),
             Some("dwrite=n,b;dbghelp=n,b")
+        );
+        std::fs::write(root.join("d3dcompiler_47.dll"), "MZ").unwrap();
+        assert_eq!(
+            dll_overrides(&install, None).as_deref(),
+            Some("dwrite=n,b;d3dcompiler_47=n,b;dbghelp=n,b")
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -8,6 +8,7 @@
 
 pub mod content;
 pub mod csp;
+pub mod d3dcompiler;
 pub mod recipes;
 pub mod weather_fx;
 

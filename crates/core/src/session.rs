@@ -518,7 +518,21 @@ impl SessionConfig {
 
         ini.set("LIGHTING", "SUN_ANGLE", sun_angle(self.time_seconds))
             .set("LIGHTING", "TIME_MULT", self.time_multiplier)
-            .set("LIGHTING", "CLOUD_SPEED", 0.2);
+            .set("LIGHTING", "CLOUD_SPEED", 0.2)
+            // Custom Shaders Patch's Weather FX ignores the sun angle and
+            // takes the time of day from a date, using the current time when
+            // none is given. These are the keys Content Manager writes.
+            .set(
+                "LIGHTING",
+                "__CM_UNCLAMPED_SUN_ANGLE",
+                sun_angle(self.time_seconds),
+            )
+            .set(
+                "LIGHTING",
+                "__CM_DATE",
+                patch_date(today(), self.time_seconds),
+            )
+            .set("LIGHTING", "__CM_DATE_USE_TIME", 1);
 
         let (grip, randomness, lap_gain, transfer) = self.surface.parameters();
         ini.set("GROOVE", "VIRTUAL_LAPS", 10)
@@ -603,6 +617,20 @@ struct Stage {
 pub fn sun_angle(seconds_since_midnight: u32) -> i32 {
     let seconds = seconds_since_midnight.clamp(TIME_MIN, TIME_MAX) as f64;
     (16.0 * (seconds - 13.0 * 3600.0) / 3600.0).round() as i32
+}
+
+/// Seconds since the Unix epoch at the start of today (UTC).
+fn today() -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    now - now % 86_400
+}
+
+/// The timestamp Custom Shaders Patch reads as `day` at the given time of
+/// day. It treats the time of day as the track's local time.
+fn patch_date(day: u64, seconds_since_midnight: u32) -> u64 {
+    day + u64::from(seconds_since_midnight.clamp(TIME_MIN, TIME_MAX))
 }
 
 pub fn format_time(seconds_since_midnight: u32) -> String {
@@ -744,6 +772,9 @@ mod tests {
         assert_eq!(ini.get("SESSION_0", "STARTING_POSITION"), Some("8"));
         assert_eq!(ini.get("TEMPERATURE", "ROAD"), Some("31"));
         assert_eq!(ini.get("LIGHTING", "SUN_ANGLE"), Some("24"));
+        let date: u64 = ini.get("LIGHTING", "__CM_DATE").unwrap().parse().unwrap();
+        assert_eq!(date % 86_400, 14 * 3600 + 30 * 60);
+        assert_eq!(ini.get("LIGHTING", "__CM_DATE_USE_TIME"), Some("1"));
     }
 
     #[test]
@@ -793,6 +824,11 @@ mod tests {
         assert_eq!(format_time(14 * 3600 + 30 * 60), "14:30");
         assert_eq!(sun_angle(8 * 3600), -80);
         assert_eq!(sun_angle(23 * 3600), 80);
+        // 2026-11-15, as Weather FX was seen to read it.
+        assert_eq!(
+            patch_date(1_794_700_800, 14 * 3600 + 30 * 60),
+            1_794_753_000
+        );
         assert_eq!(compass(45), "north-east");
         assert_eq!(compass(350), "north");
     }

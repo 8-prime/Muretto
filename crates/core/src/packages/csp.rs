@@ -8,7 +8,11 @@
 
 use std::path::Path;
 
-use super::{Progress, Receipt, Replaced, Staged, download, downloads_dir, fetch_text, uninstall};
+use super::{
+    Progress, Receipt, Replaced, Staged,
+    d3dcompiler::{self, Compiler},
+    download, downloads_dir, fetch_text, uninstall,
+};
 use crate::{Error, Install, Result, ini::Ini, io_err, lenient};
 
 pub const ID: &str = "csp";
@@ -241,13 +245,17 @@ pub(crate) const SHIM_FILE: &str = "dbghelp.dll";
 /// Compiled into the shim; keep in step with `MARKER` in its `lib.rs`.
 const SHIM_MARKER: &[u8] = b"muretto-dbghelp-shim";
 
-/// Whether the Proton fix is in the game folder.
+/// Whether the Proton fix is in the game folder. Besides the dbghelp shim it
+/// brings Microsoft's shader compiler (see [`d3dcompiler`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtonFix {
     Absent,
     Applied,
     /// An older copy from a previous Muretto version.
     Outdated,
+    /// The shim is there but the shader compiler is not, as after a fix
+    /// applied by an earlier Muretto version.
+    Incomplete,
     /// A `dbghelp.dll` Muretto did not put there; left alone.
     Foreign,
 }
@@ -255,7 +263,10 @@ pub enum ProtonFix {
 pub fn proton_fix(install: &Install) -> ProtonFix {
     match std::fs::read(install.root.join(SHIM_FILE)) {
         Err(_) => ProtonFix::Absent,
-        Ok(bytes) if bytes == SHIM => ProtonFix::Applied,
+        Ok(bytes) if bytes == SHIM => match d3dcompiler::compiler(install) {
+            Compiler::Absent => ProtonFix::Incomplete,
+            Compiler::Installed | Compiler::Other => ProtonFix::Applied,
+        },
         Ok(bytes) if is_shim(&bytes) => ProtonFix::Outdated,
         Ok(_) => ProtonFix::Foreign,
     }
@@ -265,8 +276,14 @@ pub(crate) fn is_shim(bytes: &[u8]) -> bool {
     bytes.windows(SHIM_MARKER.len()).any(|w| w == SHIM_MARKER)
 }
 
-/// Puts the fix in place, replacing an older copy.
-pub fn apply_proton_fix(install: &Install) -> Result<()> {
+/// Puts the fix in place, replacing an older copy. Fetching the shader
+/// compiler downloads about 40 MB the first time.
+pub fn apply_proton_fix(install: &Install, progress: &Progress) -> Result<()> {
+    apply_shim(install)?;
+    d3dcompiler::install(install, progress)
+}
+
+pub(crate) fn apply_shim(install: &Install) -> Result<()> {
     let target = install.root.join(SHIM_FILE);
     if proton_fix(install) == ProtonFix::Foreign {
         return Err(Error::Launch(format!(
@@ -308,8 +325,11 @@ pub(crate) fn provide_fonts(install: &Install) -> Result<()> {
 
 /// Takes the fix out again. A `dbghelp.dll` from elsewhere stays.
 pub fn remove_proton_fix(install: &Install) -> Result<()> {
+    d3dcompiler::remove(install)?;
     match proton_fix(install) {
-        ProtonFix::Applied | ProtonFix::Outdated => remove_file(&install.root.join(SHIM_FILE)),
+        ProtonFix::Applied | ProtonFix::Outdated | ProtonFix::Incomplete => {
+            remove_file(&install.root.join(SHIM_FILE))
+        }
         ProtonFix::Absent | ProtonFix::Foreign => Ok(()),
     }
 }
@@ -468,14 +488,18 @@ mod tests {
         std::fs::write(install.root.join("dwrite.dll"), "loader").unwrap();
         assert_eq!(proton_fix(&install), ProtonFix::Absent);
 
-        apply_proton_fix(&install).unwrap();
+        apply_shim(&install).unwrap();
+        assert_eq!(proton_fix(&install), ProtonFix::Incomplete);
+        // Any shader compiler beside the game will do.
+        std::fs::write(install.root.join(d3dcompiler::FILE), "MZ compiler").unwrap();
         assert_eq!(proton_fix(&install), ProtonFix::Applied);
 
         let mut older = b"MZ older build ".to_vec();
         older.extend_from_slice(SHIM_MARKER);
         std::fs::write(install.root.join(SHIM_FILE), older).unwrap();
         assert_eq!(proton_fix(&install), ProtonFix::Outdated);
-        apply_proton_fix(&install).unwrap();
+        // With a compiler in place, nothing is downloaded.
+        apply_proton_fix(&install, &Progress::new()).unwrap();
         assert_eq!(proton_fix(&install), ProtonFix::Applied);
 
         remove(&install).unwrap();
@@ -490,7 +514,7 @@ mod tests {
         std::fs::create_dir_all(&install.root).unwrap();
         std::fs::write(install.root.join(SHIM_FILE), "MZ someone else's").unwrap();
         assert_eq!(proton_fix(&install), ProtonFix::Foreign);
-        assert!(apply_proton_fix(&install).is_err());
+        assert!(apply_proton_fix(&install, &Progress::new()).is_err());
         remove_proton_fix(&install).unwrap();
         assert_eq!(
             std::fs::read(install.root.join(SHIM_FILE)).unwrap(),

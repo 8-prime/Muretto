@@ -14,6 +14,8 @@ ureq = { version = "3.5.2", default-features = false, features = ["gzip", "rustl
 # Mod archives come from 7-Zip as often as not, in any method it offers.
 zip = { version = "9.5.1", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma", "ppmd"] }
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["bzip2", "ppmd", "deflate"] }
+# Checks the shader compiler Muretto downloads for the patch under Proton.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Tests write 7z archives to unpack.
