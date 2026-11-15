@@ -117,6 +117,12 @@ impl Install {
         self.documents.join("cfg")
     }
 
+    /// Where the game and Custom Shaders Patch write their logs and crash
+    /// reports.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.documents.join("logs")
+    }
+
     pub fn executable(&self) -> PathBuf {
         self.root.join("acs.exe")
     }

@@ -279,6 +279,33 @@ pub fn apply_proton_fix(install: &Install) -> Result<()> {
     std::fs::rename(&staging, &target).map_err(io_err(&target))
 }
 
+/// The patch's interface loads Segoe UI and Verdana from the Windows fonts
+/// folder, then from `content/fonts/system`. A Proton prefix has neither, and
+/// the patch stops with "Font … is missing" just after the game window opens.
+/// The game ships Segoe UI in `content/fonts`; copies of it stand in.
+const FONT_STAND_INS: [(&str, &str); 3] = [
+    ("segoeui.ttf", "segoeui.ttf"),
+    ("verdana.ttf", "segoeui.ttf"),
+    ("verdanai.ttf", "segoeuii.ttf"),
+];
+
+/// Puts the fonts the patch needs where it looks for them last, keeping any
+/// already there. Fonts in the prefix's Windows folder still take precedence.
+pub(crate) fn provide_fonts(install: &Install) -> Result<()> {
+    let fonts = install.root.join("content/fonts");
+    let system = fonts.join("system");
+    for (name, source) in FONT_STAND_INS {
+        let target = system.join(name);
+        let source = fonts.join(source);
+        if target.exists() || !source.is_file() {
+            continue;
+        }
+        std::fs::create_dir_all(&system).map_err(io_err(&system))?;
+        std::fs::copy(&source, &target).map_err(io_err(&target))?;
+    }
+    Ok(())
+}
+
 /// Takes the fix out again. A `dbghelp.dll` from elsewhere stays.
 pub fn remove_proton_fix(install: &Install) -> Result<()> {
     match proton_fix(install) {

@@ -1,7 +1,11 @@
 //! The installed game and the session being prepared for it. One instance,
 //! shared by every screen.
 
-use std::sync::Arc;
+use std::{
+    process::Child,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use gpui_kit::{Context, SharedString};
 use muretto_core::{
@@ -14,6 +18,7 @@ use muretto_core::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum Launch {
     Idle,
+    /// The game is starting or running.
     Started,
     Failed(SharedString),
 }
@@ -167,12 +172,11 @@ impl Game {
 
     /// Writes the session and starts the simulator.
     pub fn drive(&mut self, cx: &mut Context<Self>) {
+        let started = SystemTime::now();
         self.launch = match launch::start(&self.install, &self.library, &self.session) {
-            Ok(mut child) => {
-                // Collect the exit status when the game closes, however long
-                // that takes, without holding an executor thread.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
+            Ok(child) => {
+                watch(child, started, self.install.clone(), cx, |this, ended| {
+                    this.launch = ended;
                 });
                 Launch::Started
             }
@@ -180,4 +184,34 @@ impl Game {
         };
         cx.notify();
     }
+}
+
+/// Follows a game started at `started` until it closes, then hands `ended`
+/// how it went: idle again, or why it failed.
+pub fn watch<T: 'static>(
+    mut child: Child,
+    started: SystemTime,
+    install: Install,
+    cx: &mut Context<T>,
+    ended: impl FnOnce(&mut T, Launch) + 'static,
+) {
+    cx.spawn(async move |this, cx| {
+        // Looking once a second holds no thread for however long the game runs.
+        let status = loop {
+            match child.try_wait() {
+                Ok(None) => cx.background_executor().timer(Duration::from_secs(1)).await,
+                Ok(Some(status)) => break Some(status),
+                Err(_) => break None,
+            }
+        };
+        let launch = match status.map(|status| launch::outcome(&install, started, status)) {
+            Some(Err(error)) => Launch::Failed(error.to_string().into()),
+            _ => Launch::Idle,
+        };
+        let _ = this.update(cx, |this, cx| {
+            ended(this, launch);
+            cx.notify();
+        });
+    })
+    .detach();
 }

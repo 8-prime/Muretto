@@ -921,10 +921,12 @@ impl OnlineScreen {
             password: &password,
         };
         let server = listed.server.clone();
+        let started = std::time::SystemTime::now();
         self.launch = match launch::join(&game.install, &join) {
-            Ok(mut child) => {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
+            Ok(child) => {
+                let install = game.install.clone();
+                crate::game::watch(child, started, install, cx, |this, ended| {
+                    this.launch = ended;
                 });
                 Launch::Started
             }
