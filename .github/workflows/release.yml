@@ -49,7 +49,7 @@ jobs:
           version=$(cargo pkgid -p muretto | sed 's/.*[#@]//')
           dir="muretto-$version-${{ matrix.name }}"
           mkdir "$dir"
-          cp target/release/muretto README.md "$dir/"
+          cp target/release/muretto README.md LICENSE "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
           echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
 
@@ -60,7 +60,7 @@ jobs:
           $version = (cargo pkgid -p muretto) -replace '.*[#@]', ''
           $dir = "muretto-$version-${{ matrix.name }}"
           New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item target/release/muretto.exe, README.md $dir
+          Copy-Item target/release/muretto.exe, README.md, LICENSE $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           "ASSET=$dir.zip" | Out-File -Append $env:GITHUB_ENV
 

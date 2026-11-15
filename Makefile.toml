@@ -44,6 +44,11 @@ for size in 32 48 64 128 256 512; do
 done
 '''
 
+[tasks.aur]
+description = "Publish the AUR package muretto-bin: cargo make aur VERSION [GIT-REF]. Publish the GitHub release first."
+command = "packaging/aur/publish.sh"
+args = ["${@}"]
+
 [tasks.scan]
 description = "Print what Muretto finds on this machine."
 command = "cargo"

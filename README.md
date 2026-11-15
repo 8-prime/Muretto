@@ -3,6 +3,28 @@
 A launcher and content manager for Assetto Corsa, for Linux and Windows.
 Written in Rust on [GPUI](https://gpui.rs) through [GPUI Kit](https://gpui-kit.com).
 
+![Quick drive: car, track, session, conditions and assists on one page](docs/screenshots/drive.png)
+
+| | |
+| --- | --- |
+| ![Choosing a car from the installed content](docs/screenshots/cars.png) | ![The online server list with filters, pings and missing content](docs/screenshots/online.png) |
+| ![Settings: Weather FX styles for Custom Shaders Patch](docs/screenshots/settings.png) | |
+
+## Install
+
+Download the archive for your system from the
+[releases](https://github.com/8-prime/Muretto/releases), unpack it and run
+`muretto` (Linux) or `muretto.exe` (Windows). Muretto finds the game through
+Steam; on Linux it runs the game with Proton.
+
+On Arch Linux and its derivatives, install the
+[`muretto-bin`](https://aur.archlinux.org/packages/muretto-bin) package from
+the AUR:
+
+```sh
+paru -S muretto-bin   # or yay -S muretto-bin
+```
+
 The interface follows `docs/design/AC Launcher — UI Design.pdf`.
 
 ## Layout
@@ -104,8 +126,29 @@ To try an install against the real download without touching the game:
 cargo run -p muretto-core --example csp -- /tmp/fake-game
 ```
 
+## Releasing
+
+Bump `version` in `Cargo.toml` (it shows under Settings › About and updates),
+commit, and push a tag such as `v0.0.2`. The release workflow builds Linux
+(on Ubuntu 22.04, so the binary runs on older glibc) and Windows (gpui
+compiles its shaders only on a Windows host) and attaches both to a draft
+release. Publish the release, then update the AUR package:
+
+```sh
+cargo make aur 0.0.2
+```
+
+That copies `packaging/aur/muretto-bin/PKGBUILD` into a clone of the AUR
+repository under `target/aur`, sets the version, fills in checksums and
+`.SRCINFO`, commits and pushes. It needs `pacman-contrib` (for
+`updpkgsums`) and an AUR account with your SSH key.
+
 ## Fonts and icons
 
 Barlow Condensed, Inter and JetBrains Mono (SIL Open Font License) and a few
 Lucide icons (ISC) are compiled in from `crates/app/assets`, with their
 licences beside them.
+
+## License
+
+Muretto is under the [MIT License](LICENSE).
