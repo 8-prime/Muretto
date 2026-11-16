@@ -4,8 +4,9 @@
 #   docker build -f crates/group-server/Dockerfile -t muretto-group-server .
 #   docker run --rm -p 3100:3100 muretto-group-server
 #
-# Put it behind a TLS proxy that forwards WebSocket upgrades on /v1/, and
-# point Muretto at the wss:// address. The server makes no connections of its
+# Put it behind a TLS proxy that forwards WebSocket upgrades on /v1/ and
+# plain requests to the rest (the landing page at /), and point Muretto at
+# the wss:// address. The server makes no connections of its
 # own, so the image needs no certificates.
 
 # On Alpine, Rust targets musl and links statically by default.

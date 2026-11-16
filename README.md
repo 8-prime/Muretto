@@ -12,10 +12,13 @@ Written in Rust on [GPUI](https://gpui.rs) through [GPUI Kit](https://gpui-kit.c
 
 ## Install
 
-Download the archive for your system from the
-[releases](https://github.com/8-prime/Muretto/releases), unpack it and run
-`muretto` (Linux) or `muretto.exe` (Windows). Muretto finds the game through
-Steam; on Linux it runs the game with Proton.
+Download the binary for your system from
+[muretto.8-prime.dev](https://muretto.8-prime.dev) or the
+[releases](https://github.com/8-prime/Muretto/releases) and run it:
+`muretto-windows-x86_64.exe` on Windows, `muretto-linux-x86_64` on Linux
+after `chmod +x muretto-linux-x86_64`. It is a single file with nothing to
+install. Muretto finds the game through Steam; on Linux it runs the game
+with Proton.
 
 On Arch Linux and its derivatives, install the
 [`muretto-bin`](https://aur.archlinux.org/packages/muretto-bin) package from
@@ -110,7 +113,9 @@ docker build -f crates/group-server/Dockerfile -t muretto-group-server .
 
 `GROUP_ADDR` sets where it listens and `GROUP_MAX_CONNECTIONS` caps
 connections (4096). Run it behind TLS that forwards WebSocket upgrades on
-`/v1/`. Rooms hold 16 members; a member may send 20 messages in a burst and 5
+`/v1/` and plain requests everywhere else: opened in a browser, the server
+shows a page about Muretto with download links
+(`crates/group-server/src/landing.html`). Rooms hold 16 members; a member may send 20 messages in a burst and 5
 a second after that.
 
 To be a second member without a second machine, join as a pretend friend;
@@ -131,8 +136,10 @@ cargo run -p muretto-core --example csp -- /tmp/fake-game
 Bump `version` in `Cargo.toml` (it shows under Settings › About and updates),
 commit, and push a tag such as `v0.0.2`. The release workflow builds Linux
 (on Ubuntu 22.04, so the binary runs on older glibc) and Windows (gpui
-compiles its shaders only on a Windows host) and attaches both to a draft
-release. Publish the release, then update the AUR package:
+compiles its shaders only on a Windows host) and attaches both binaries,
+`muretto-linux-x86_64` and `muretto-windows-x86_64.exe`, with their
+`SHA256SUMS`, to a draft release. Keep those names: the landing page links
+`releases/latest/download/<name>`. Publish the release, then update the AUR package:
 
 ```sh
 cargo make aur 0.0.2

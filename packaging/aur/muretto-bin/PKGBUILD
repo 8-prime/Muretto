@@ -15,7 +15,7 @@ license=('MIT')
 depends=('glibc' 'gcc-libs' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'vulkan-icd-loader')
 provides=('muretto')
 conflicts=('muretto')
-source=("$url/releases/download/v$pkgver/muretto-$pkgver-linux-x86_64.tar.gz"
+source=("muretto-$pkgver::$url/releases/download/v$pkgver/muretto-linux-x86_64"
         "muretto-$_ref.svg::https://raw.githubusercontent.com/8-prime/Muretto/$_ref/crates/app/assets/icon/muretto.svg"
         "LICENSE-$_ref::https://raw.githubusercontent.com/8-prime/Muretto/$_ref/LICENSE")
 sha256sums=('SKIP'
@@ -23,7 +23,7 @@ sha256sums=('SKIP'
             'SKIP')
 
 package() {
-  install -Dm755 "muretto-$pkgver-linux-x86_64/muretto" "$pkgdir/usr/bin/muretto"
+  install -Dm755 "muretto-$pkgver" "$pkgdir/usr/bin/muretto"
   install -Dm644 "muretto-$_ref.svg" \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.muretto.Muretto.svg"
   install -Dm644 "LICENSE-$_ref" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

@@ -1,6 +1,10 @@
 # Builds Muretto for Linux and Windows when a version tag is pushed, and
 # attaches both to a draft GitHub release to look over and publish.
 #
+# The assets are the bare binaries, named without a version, so
+# releases/latest/download/<name> always fetches the newest one: the group
+# server's landing page links there. SHA256SUMS lists their checksums.
+#
 # Linux builds on the oldest supported Ubuntu so the binary runs on older
 # glibc too. Windows must build on Windows: gpui compiles its shaders with
 # the SDK's fxc.exe only on a Windows host.
@@ -43,26 +47,18 @@ jobs:
       - name: Build
         run: cargo build -p muretto --release --locked
 
-      - name: Package (Linux)
+      - name: Name the binary (Linux)
         if: runner.os == 'Linux'
         run: |
-          version=$(cargo pkgid -p muretto | sed 's/.*[#@]//')
-          dir="muretto-$version-${{ matrix.name }}"
-          mkdir "$dir"
-          cp target/release/muretto README.md LICENSE "$dir/"
-          tar -czf "$dir.tar.gz" "$dir"
-          echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
+          cp target/release/muretto muretto-${{ matrix.name }}
+          echo "ASSET=muretto-${{ matrix.name }}" >> "$GITHUB_ENV"
 
-      - name: Package (Windows)
+      - name: Name the binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = (cargo pkgid -p muretto) -replace '.*[#@]', ''
-          $dir = "muretto-$version-${{ matrix.name }}"
-          New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item target/release/muretto.exe, README.md, LICENSE $dir
-          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
-          "ASSET=$dir.zip" | Out-File -Append $env:GITHUB_ENV
+          Copy-Item target/release/muretto.exe muretto-${{ matrix.name }}.exe
+          "ASSET=muretto-${{ matrix.name }}.exe" | Out-File -Append $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
@@ -78,9 +74,12 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Checksums
+        run: sha256sum muretto-* > SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
           files: |
-            *.tar.gz
-            *.zip
+            muretto-*
+            SHA256SUMS

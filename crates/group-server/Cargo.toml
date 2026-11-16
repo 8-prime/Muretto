@@ -16,3 +16,4 @@ serde_json.workspace = true
 muretto-core.workspace = true
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio = { version = "1.54", features = ["io-util"] }

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Muretto - Assetto Corsa launcher for Linux and Windows</title>
+<meta name="description" content="A launcher and content manager for Assetto Corsa, for Linux and Windows.">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<style>
+  @font-face {
+    font-family: "Barlow Condensed";
+    src: url("/display.ttf") format("truetype");
+    font-weight: 600;
+    font-style: normal;
+    font-display: swap;
+  }
+  :root {
+    --bg: #0D0E10;
+    --surface: #16171B;
+    --raised: #1C1F24;
+    --border: #2B2C30;
+    --border-strong: #3C3E44;
+    --text: #ECEDEF;
+    --muted: #A2A6AB;
+    --dim: #7B8085;
+    --accent: #D9281E;
+    --accent-hover: #E5382D;
+    --accent-text: #F2584B;
+    --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+    --body: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); color: var(--text); }
+  body {
+    margin: 0;
+    font: 16px/1.6 var(--body);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-text); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  header { border-bottom: 1px solid var(--border); }
+  header .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 12px; color: var(--text); text-decoration: none; }
+  .brand img { width: 32px; height: 32px; }
+  .display {
+    font-family: var(--display);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    line-height: 1.05;
+  }
+  .brand span { font-size: 26px; }
+  header nav a { color: var(--muted); text-decoration: none; font-weight: 600; font-size: 15px; }
+  header nav a:hover { color: var(--text); }
+
+  .hero { padding: 72px 0 40px; }
+  .hero h1 { font-size: clamp(44px, 7vw, 80px); margin: 0 0 16px; }
+  .lede { font-size: 19px; color: var(--muted); max-width: 640px; margin: 0 0 32px; }
+
+  .downloads { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+  .button {
+    display: inline-flex; flex-direction: column; justify-content: center;
+    min-width: 220px; padding: 12px 20px;
+    border-radius: 2px; border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); text-decoration: none;
+  }
+  .button:hover { background: var(--raised); }
+  .button.primary { background: var(--accent); border-color: var(--accent); }
+  .button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .button .display { font-size: 22px; }
+  .button small { font-size: 13px; color: inherit; opacity: 0.8; }
+  .note { color: var(--dim); font-size: 14px; margin: 0; }
+  code {
+    font-family: var(--mono); font-size: 0.9em;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 2px; padding: 1px 6px; color: var(--text);
+    white-space: nowrap;
+  }
+
+  .shot { margin: 48px 0 0; }
+  .shot img {
+    display: block; width: 100%; height: auto;
+    border: 1px solid var(--border); border-radius: 2px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  }
+
+  section.goal { padding: 72px 0 24px; }
+  section h2 { font-size: 40px; margin: 0 0 12px; }
+  section > .wrap > p { color: var(--muted); max-width: 720px; margin: 0 0 32px; font-size: 17px; }
+  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .feature {
+    background: var(--surface); border: 1px solid var(--border);
+    border-top: 2px solid var(--accent); border-radius: 2px; padding: 20px;
+  }
+  .feature h3 { font-size: 24px; margin: 0 0 8px; }
+  .feature p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .server { padding: 48px 0 72px; }
+  .server .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 2px;
+    padding: 24px; display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap;
+  }
+  .server .panel h2 { font-size: 28px; margin: 0 0 8px; }
+  .server .panel p { margin: 0; color: var(--muted); max-width: 760px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #57D688; margin-top: 10px; flex: none; }
+
+  footer { border-top: 1px solid var(--border); color: var(--dim); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; padding-top: 24px; padding-bottom: 24px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/icon.svg" alt=""><span class="display">Muretto</span></a>
+    <nav><a href="https://github.com/8-prime/Muretto">GitHub</a></nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <h1 class="display">A launcher and content manager for Assetto Corsa</h1>
+      <p class="lede">
+        For Linux and Windows. Set up a session and drive, browse online
+        servers, install mods and see which server your friends are on.
+      </p>
+      <div class="downloads">
+        <a class="button primary" href="https://github.com/8-prime/Muretto/releases/latest/download/muretto-linux-x86_64">
+          <span class="display">Download for Linux</span>
+          <small>x86_64</small>
+        </a>
+        <a class="button" href="https://github.com/8-prime/Muretto/releases/latest/download/muretto-windows-x86_64.exe">
+          <span class="display">Download for Windows</span>
+          <small>x86_64</small>
+        </a>
+      </div>
+      <p class="note">
+        On Linux, make the file executable with
+        <code>chmod +x muretto-linux-x86_64</code>. On Arch Linux you can install
+        <a href="https://aur.archlinux.org/packages/muretto-bin"><code>muretto-bin</code></a>
+        from the AUR. Older versions are on the
+        <a href="https://github.com/8-prime/Muretto/releases">releases page</a>.
+      </p>
+      <figure class="shot">
+        <img src="/drive.png" width="2880" height="1800"
+             alt="Muretto's quick drive page with car, track, session, conditions and assists">
+      </figure>
+    </div>
+  </div>
+
+  <section class="goal">
+    <div class="wrap">
+      <h2 class="display">What it does</h2>
+      <p>
+        Muretto finds Assetto Corsa in your Steam library and starts it
+        directly. On Linux it runs the game through Proton.
+      </p>
+      <div class="features">
+        <div class="feature">
+          <h3 class="display">Quick drive</h3>
+          <p>Choose car, track, session, weather and assists from your installed content and start the game.</p>
+        </div>
+        <div class="feature">
+          <h3 class="display">Online servers</h3>
+          <p>Browse servers with filters and ping. If a server needs cars or tracks you don't have, Muretto installs them from the server's download link.</p>
+        </div>
+        <div class="feature">
+          <h3 class="display">Mods</h3>
+          <p>Installs Custom Shaders Patch, Pure and other mods. Muretto records every file it adds, so updates and removals leave nothing behind and game files a mod replaced are restored.</p>
+        </div>
+        <div class="feature">
+          <h3 class="display">Friends</h3>
+          <p>Share a group code to see which server each friend has open. Join with one click, or follow a friend to join wherever they go.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="server">
+    <div class="wrap">
+      <div class="panel">
+        <span class="dot" aria-hidden="true"></span>
+        <div>
+          <h2 class="display">Group server</h2>
+          <p>
+            This server connects Muretto friend groups. Group data is
+            encrypted with a key derived from the group code; the server only
+            forwards it and cannot read it. The server is open source and you
+            can host your own.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Muretto is free software under the MIT License. Not affiliated with Kunos Simulazioni.</span>
+    <span><a href="https://github.com/8-prime/Muretto">Source on GitHub</a> · <a href="https://github.com/8-prime/Muretto/releases">Releases</a></span>
+  </div>
+</footer>
+</body>
+</html>

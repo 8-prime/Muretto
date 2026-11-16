@@ -5,6 +5,9 @@
 //! passes every change on. It cannot read the states and never learns a
 //! code. See `muretto-group-protocol` for the messages.
 //!
+//! Opened in a browser, the server shows a page about Muretto with its
+//! downloads (see `site`).
+//!
 //! Configuration, from the environment:
 //!
 //! | Variable | Default | |
@@ -32,6 +35,8 @@ use axum::{
 };
 use muretto_group_protocol::{ClientMessage, Outbox, Rooms, ServerMessage};
 use tokio::sync::mpsc;
+
+mod site;
 
 /// How often the server pings each member, and how long it waits to hear
 /// anything at all before it gives up on one.
@@ -92,6 +97,7 @@ fn app(server: Arc<Server>) -> Router {
     Router::new()
         .route("/v1/{room}", get(upgrade))
         .route("/health", get(|| async { "ok" }))
+        .merge(site::routes())
         .with_state(server)
 }
 
@@ -363,6 +369,53 @@ mod tests {
                 .is_err()
         );
         assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_browser_gets_the_landing_page_and_what_it_shows() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        async fn get(address: std::net::SocketAddr, path: &str) -> (String, Vec<u8>) {
+            let mut tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: muretto\r\nConnection: close\r\n\r\n");
+            tcp.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            tcp.read_to_end(&mut response).await.unwrap();
+            let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let head = String::from_utf8(response[..split].to_vec()).unwrap();
+            (head.to_lowercase(), response[split + 4..].to_vec())
+        }
+
+        let (address, _) = start(16).await;
+        let (head, body) = get(address, "/").await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(head.contains("content-type: text/html"), "{head}");
+        let page = String::from_utf8(body).unwrap();
+        for link in [
+            "/releases/latest/download/muretto-linux-x86_64\"",
+            "/releases/latest/download/muretto-windows-x86_64.exe\"",
+            "https://github.com/8-prime/Muretto\"",
+        ] {
+            assert!(page.contains(link), "the page links {link}");
+        }
+        for (path, kind) in [
+            ("/drive.png", "image/png"),
+            ("/icon.svg", "image/svg+xml"),
+            ("/display.ttf", "font/ttf"),
+        ] {
+            assert!(
+                page.contains(&format!("\"{path}\"")),
+                "the page uses {path}"
+            );
+            let (head, body) = get(address, path).await;
+            assert!(head.starts_with("http/1.1 200"), "{path}: {head}");
+            assert!(
+                head.contains(&format!("content-type: {kind}")),
+                "{path}: {head}"
+            );
+            assert!(!body.is_empty());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
