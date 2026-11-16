@@ -4,7 +4,7 @@
 # sets the version and checksums in a clone of the AUR repository and
 # pushes it; the checksums here stay SKIP.
 pkgname=muretto-bin
-pkgver=0.0.1
+pkgver=0.0.2
 pkgrel=1
 # Where the icon and licence come from: the release's tag.
 _ref=v$pkgver
