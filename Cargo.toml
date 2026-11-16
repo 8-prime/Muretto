@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/app", "crates/dbghelp-shim", "crates/group-protocol", "crates/group-server"]
+members = ["crates/core", "crates/app", "crates/dbghelp-shim", "crates/group-protocol", "crates/group-server", "crates/host-agent", "crates/host-protocol"]
 default-members = ["crates/app"]
 
 [workspace.package]

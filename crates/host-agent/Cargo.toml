@@ -1,0 +1,23 @@
+[package]
+name = "muretto-host-agent"
+description = "Runs AssettoServer for Muretto: keeps server presets and content, writes the active preset's config and restarts the server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+muretto-host-protocol = { path = "../host-protocol" }
+axum = "0.8.9"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "process", "fs", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10"
+futures-util = { version = "0.3", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+# To ask the server to stop with SIGTERM before killing it.
+libc = "0.2"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

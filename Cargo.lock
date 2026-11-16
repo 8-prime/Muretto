@@ -4456,6 +4456,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "muretto-host-agent"
+version = "0.0.2"
+dependencies = [
+ "axum",
+ "futures-util",
+ "http-body-util",
+ "libc",
+ "muretto-host-protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "muretto-host-protocol"
+version = "0.0.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "naga"
 version = "30.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
