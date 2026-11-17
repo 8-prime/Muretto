@@ -3,6 +3,7 @@
 mod about;
 mod controls;
 mod form;
+mod general;
 mod page;
 mod pages;
 mod patch;
@@ -18,7 +19,10 @@ use gpui_kit::{
     prelude::*,
     px, rgb, svg,
 };
-use muretto_core::packages::{csp, recipes::Recipe};
+use muretto_core::{
+    packages::{csp, recipes::Recipe},
+    prefs::Prefs,
+};
 
 use crate::{
     game::Game,
@@ -60,7 +64,7 @@ const GROUPS: [(&str, &[&str]); 3] = [
     (
         "Launcher",
         &[
-            "General",
+            GENERAL_PAGE,
             "Game and content folders",
             "Runtime",
             "Integrations",
@@ -72,12 +76,15 @@ const PATCH_GROUP: &str = "Custom Shaders Patch";
 const PATCH_PAGE: &str = "Versions and updates";
 const WEATHER_PAGE: &str = "Weather FX";
 const ABOUT_PAGE: &str = "About and updates";
+const GENERAL_PAGE: &str = "General";
 
 /// Requests the screen cannot fulfil itself because they cover the window.
 pub enum SettingsEvent {
     /// The player wants this mod: show them where to get it and take the
     /// archive from them.
     Get(&'static Recipe),
+    /// Server hosting was turned on or off: the Host section comes or goes.
+    Hosting(bool),
 }
 
 pub struct SettingsScreen {
@@ -90,6 +97,9 @@ pub struct SettingsScreen {
     config_pages: Vec<(&'static str, Entity<ConfigPage>)>,
     search: Entity<InputState>,
     query: String,
+    /// Muretto's own settings.
+    prefs: Prefs,
+    prefs_error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +109,7 @@ impl SettingsScreen {
     pub fn new(
         game: Entity<Game>,
         source: Arc<dyn csp::Source>,
+        prefs: Prefs,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -154,6 +165,8 @@ impl SettingsScreen {
             config_pages,
             search,
             query: String::new(),
+            prefs,
+            prefs_error: None,
             _subscriptions,
         }
     }
@@ -170,6 +183,7 @@ impl SettingsScreen {
             PATCH_PAGE => &["Custom Shaders Patch", "CSP", "Install", "Update", "Proton"],
             WEATHER_PAGE => &["Weather", "Sky", "Clouds", "Pure", "Sol"],
             ABOUT_PAGE => &["Version", "Release"],
+            GENERAL_PAGE => general::HOSTING_TERMS,
             _ => &[],
         };
         words.iter().map(|w| SharedString::from(*w)).collect()
@@ -308,6 +322,7 @@ impl Render for SettingsScreen {
             WEATHER_PAGE => self.weather.clone().into_any_element(),
             CONTROLS_PAGE => self.controls.clone().into_any_element(),
             ABOUT_PAGE => about::about_page().into_any_element(),
+            GENERAL_PAGE => general::general_page(self.prefs.hosting(), cx).into_any_element(),
             other if let Some((_, view)) = self.config_pages.iter().find(|(n, _)| *n == other) => {
                 view.clone().into_any_element()
             }
@@ -322,7 +337,12 @@ impl Render for SettingsScreen {
                 .child(muted("This part of Muretto has not been built yet."))
                 .into_any_element(),
         };
-        let error = self.game.read(cx).config_error.clone();
+        let error = self
+            .game
+            .read(cx)
+            .config_error
+            .clone()
+            .or_else(|| self.prefs_error.clone());
 
         div()
             .flex()
@@ -380,6 +400,7 @@ impl Render for SettingsScreen {
                         .child(div().flex_1().min_w_0().text_size(px(13.)).child(error))
                         .child(button("settings-error-dismiss", "Dismiss").on_click(
                             cx.listener(|this, _, _, cx| {
+                                this.prefs_error = None;
                                 this.game.update(cx, |game, cx| {
                                     game.config_error = None;
                                     cx.notify();

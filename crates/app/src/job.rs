@@ -83,6 +83,12 @@ impl Job {
             }
             (Stage::Unpacking, _) => "Unpacking".to_owned(),
             (Stage::Installing, _) => "Moving files into the game folder".to_owned(),
+            (Stage::Uploading, Some(total)) => format!(
+                "Uploading · {} of {} MB",
+                megabytes(progress.done()),
+                megabytes(total)
+            ),
+            (Stage::Uploading, None) => "Uploading".to_owned(),
         };
         let cancellable = progress.stage() != Stage::Installing;
         let cancel = progress.clone();

@@ -11,8 +11,10 @@ use std::{path::PathBuf, sync::Arc};
 use muretto_core::{
     Install, Library,
     group::{self, Groups, WebSocketRelay},
+    host::Hosts,
     online::{self, saved::Saved},
     packages::csp,
+    prefs::Prefs,
     session::format_time,
 };
 
@@ -23,6 +25,7 @@ use crate::{
         drive::{DriveEvent, DriveScreen},
         friends::GroupSetup,
         get_mod::{GetDialog, GetEvent},
+        host::HostScreen,
         online::{OnlineScreen, Tab},
         picker::{Picker, PickerEvent, PickerItem},
         settings::{SettingsEvent, SettingsScreen},
@@ -34,10 +37,12 @@ use crate::{
 const DRIVE: usize = 0;
 const CONTENT: usize = 1;
 const ONLINE: usize = 2;
-const SETTINGS: usize = 4;
+/// Shown only with server hosting turned on in the settings.
+const HOST: usize = 3;
+const SETTINGS: usize = 5;
 
 /// Sections and the tabs within each.
-const SECTIONS: [(&str, &[&str]); 5] = [
+const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Drive",
         &["Quick drive", "Career", "Championships", "Special events"],
@@ -59,6 +64,7 @@ const SECTIONS: [(&str, &[&str]); 5] = [
         "Online",
         &["All servers", "Favourites", "Recent", "LAN", "Friends"],
     ),
+    ("Host", &[]),
     (
         "Results",
         &[
@@ -79,6 +85,7 @@ enum Stage {
         game: Entity<Game>,
         drive: Entity<DriveScreen>,
         online: Entity<OnlineScreen>,
+        host: Entity<HostScreen>,
         settings: Entity<SettingsScreen>,
     },
 }
@@ -95,6 +102,10 @@ pub struct Sources {
     pub saved_groups: Option<PathBuf>,
     /// The group server; `None` reaches the one the settings name.
     pub group_relay: Option<Arc<dyn group::Relay>>,
+    /// Muretto's own settings; kept nowhere when `None`.
+    pub prefs: Option<PathBuf>,
+    /// The server hosts the player added; kept nowhere when `None`.
+    pub hosts: Option<PathBuf>,
 }
 
 impl Sources {
@@ -105,6 +116,8 @@ impl Sources {
             saved_servers: Saved::default_path(),
             saved_groups: Groups::default_path(),
             group_relay: None,
+            prefs: Prefs::default_path(),
+            hosts: Hosts::default_path(),
         }
     }
 }
@@ -149,6 +162,8 @@ pub struct Shell {
     /// The pointer went down on the title bar; moving it now moves the
     /// window.
     moving: bool,
+    /// Whether the Host section is shown.
+    hosting: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -203,6 +218,19 @@ impl Shell {
         }
     }
 
+    /// The Host section's screen, once content has been read.
+    pub fn host(&self) -> Option<&Entity<HostScreen>> {
+        match &self.stage {
+            Stage::Ready { host, .. } => Some(host),
+            _ => None,
+        }
+    }
+
+    /// Whether the Host section is in the navigation.
+    pub fn is_hosting(&self) -> bool {
+        self.hosting
+    }
+
     /// The game and session, once content has been read.
     pub fn game(&self) -> Option<&Entity<Game>> {
         match &self.stage {
@@ -234,6 +262,7 @@ impl Shell {
             picker: None,
             getting: None,
             moving: false,
+            hosting: false,
             _subscriptions: Vec::new(),
         }
     }
@@ -254,7 +283,12 @@ impl Shell {
         };
         let game = cx.new(|_| game);
         let drive = cx.new(|cx| DriveScreen::new(game.clone(), window, cx));
-        let settings = cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, window, cx));
+        let prefs = Prefs::load(sources.prefs);
+        self.hosting = prefs.hosting();
+        let settings =
+            cx.new(|cx| SettingsScreen::new(game.clone(), sources.patches, prefs, window, cx));
+        let hosts = Hosts::load(sources.hosts);
+        let host = cx.new(|cx| HostScreen::new(game.clone(), hosts, window, cx));
         let saved = Saved::load(sources.saved_servers);
         let kept = Groups::load(sources.saved_groups);
         let relay = sources.group_relay.or_else(|| {
@@ -278,7 +312,17 @@ impl Shell {
             cx.subscribe_in(&settings, window, {
                 let game = game.clone();
                 move |this, _, event: &SettingsEvent, window, cx| {
-                    let SettingsEvent::Get(recipe) = *event;
+                    let recipe = match *event {
+                        SettingsEvent::Get(recipe) => recipe,
+                        SettingsEvent::Hosting(on) => {
+                            this.hosting = on;
+                            if !on && this.section == HOST {
+                                this.section = SETTINGS;
+                            }
+                            cx.notify();
+                            return;
+                        }
+                    };
                     let dialog = cx.new(|cx| GetDialog::new(game.clone(), recipe, window, cx));
                     let closed = cx.subscribe(&dialog, |this, _, _: &GetEvent, cx| {
                         this.getting = None;
@@ -293,6 +337,7 @@ impl Shell {
             game,
             drive,
             online,
+            host,
             settings,
         };
     }
@@ -411,45 +456,56 @@ impl Shell {
                     )
                     .child(display(APP_NAME, 24.)),
             )
-            .children(SECTIONS.iter().enumerate().map(|(index, (name, _))| {
-                let active = index == self.section;
-                div()
-                    .id(("section", index))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .h_full()
-                    .px(px(18.))
-                    .cursor_pointer()
-                    .border_x_1()
-                    .border_color(rgb(if active { color::BORDER } else { color::BG }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.section = index;
-                        if index == ONLINE
-                            && let Some(online) = this.online()
-                        {
-                            online.update(cx, |online, cx| online.visit(cx));
-                        }
-                        cx.notify();
-                    }))
-                    .child(display(name, 19.).text_color(rgb(if active {
-                        color::TEXT
-                    } else {
-                        color::TEXT_MUTED
-                    })))
-                    .when(active, |tab| {
-                        tab.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(px(3.))
-                                .bg(rgb(color::ACCENT)),
-                        )
-                    })
-                    .test_support()
-            }))
+            .children(
+                SECTIONS
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != HOST || self.hosting)
+                    .map(|(index, (name, _))| {
+                        let active = index == self.section;
+                        div()
+                            .id(("section", index))
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .h_full()
+                            .px(px(18.))
+                            .cursor_pointer()
+                            .border_x_1()
+                            .border_color(rgb(if active { color::BORDER } else { color::BG }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.section = index;
+                                if index == ONLINE
+                                    && let Some(online) = this.online()
+                                {
+                                    online.update(cx, |online, cx| online.visit(cx));
+                                }
+                                if index == HOST
+                                    && let Some(host) = this.host()
+                                {
+                                    host.update(cx, |host, cx| host.visit(cx));
+                                }
+                                cx.notify();
+                            }))
+                            .child(display(name, 19.).text_color(rgb(if active {
+                                color::TEXT
+                            } else {
+                                color::TEXT_MUTED
+                            })))
+                            .when(active, |tab| {
+                                tab.child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom_0()
+                                        .h(px(3.))
+                                        .bg(rgb(color::ACCENT)),
+                                )
+                            })
+                            .test_support()
+                    }),
+            )
             .child(self.drag_area("title-drag", cx).flex_1().h_full())
             .child(
                 // The status doubles as the way to the patch's page.
@@ -620,6 +676,7 @@ impl Shell {
             Stage::Ready {
                 drive,
                 online,
+                host,
                 settings,
                 ..
             } => {
@@ -629,6 +686,8 @@ impl Shell {
                     drive.clone().into_any_element()
                 } else if self.on_servers() {
                     online.clone().into_any_element()
+                } else if self.section == HOST && self.hosting {
+                    host.clone().into_any_element()
                 } else if self.section == SETTINGS {
                     settings.clone().into_any_element()
                 } else {

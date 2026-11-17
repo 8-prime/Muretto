@@ -4,12 +4,14 @@
 pub mod content;
 pub mod country;
 pub mod group;
+pub mod host;
 pub mod ini;
 pub mod install;
 pub mod launch;
 pub mod lenient;
 pub mod online;
 pub mod packages;
+pub mod prefs;
 pub mod session;
 pub mod settings;
 pub mod steam;

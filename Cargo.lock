@@ -4400,10 +4400,13 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 name = "muretto"
 version = "0.0.2"
 dependencies = [
+ "axum",
  "dirs 6.0.0",
  "gpui-kit",
  "image",
  "muretto-core",
+ "muretto-host-agent",
+ "tokio",
  "zip",
 ]
 
@@ -4411,16 +4414,21 @@ dependencies = [
 name = "muretto-core"
 version = "0.0.2"
 dependencies = [
+ "axum",
  "base64 0.22.1",
  "dirs 6.0.0",
  "encoding_rs",
  "muretto-group-protocol",
+ "muretto-host-agent",
+ "muretto-host-protocol",
  "ring",
  "rustls",
+ "serde",
  "serde_json",
  "sevenz-rust2",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "tokio",
  "tungstenite",
  "ureq",
  "webpki-roots",

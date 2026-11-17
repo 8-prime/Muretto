@@ -312,6 +312,8 @@ fn open_with_groups(
                     saved_servers: Some(saved_servers(root)),
                     saved_groups: Some(saved_groups(root)),
                     group_relay: Some(Arc::new(groups)),
+                    prefs: Some(root.parent().unwrap().join("settings.json")),
+                    hosts: Some(saved_hosts(root)),
                 };
                 cx.new(|cx| Shell::with_content(install, library, sources, window, cx))
             },
@@ -328,6 +330,10 @@ fn open_with_groups(
 
 fn saved_servers(root: &Path) -> PathBuf {
     root.parent().unwrap().join("servers.json")
+}
+
+fn saved_hosts(root: &Path) -> PathBuf {
+    root.parent().unwrap().join("hosts.json")
 }
 
 fn saved_groups(root: &Path) -> PathBuf {
@@ -482,7 +488,7 @@ fn dragging_a_slider_to_its_end_sets_the_limit(cx: &mut TestAppContext) {
     cx.update(|cx| assert_eq!(game.read(cx).session().ai_strength, 70));
 }
 
-const SETTINGS: (&str, usize) = ("section", 4);
+const SETTINGS: (&str, usize) = ("section", 5);
 const PATCH_PAGE: (&str, usize) = ("Custom Shaders Patch", 0);
 
 #[gpui_kit::test]
@@ -1229,6 +1235,185 @@ fn searching_settings_opens_the_page_that_has_it(cx: &mut TestAppContext) {
             window.try_find(("Assetto Corsa", 0usize)).is_none(),
             "Video has no kerbs"
         );
+    })
+    .unwrap();
+}
+
+/// Runs the host agent on a scratch folder until the test ends, with a
+/// shell standing in for AssettoServer; returns its URL.
+#[cfg(unix)]
+fn host_agent(dir: &Path, token: &str) -> String {
+    use muretto_host_agent::config::{Config, Host, Tokens};
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+    let free_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = Config {
+        addr: "127.0.0.1:0".parse().unwrap(),
+        server_dir: dir.to_owned(),
+        state_dir: dir.join("muretto"),
+        command: "/bin/sh".into(),
+        args: vec!["-c".into(), "exec sleep 60".into()],
+        host: Host {
+            http_port: free_port,
+            ..Host::default()
+        },
+        tokens: Tokens::parse(&format!("alex:{token}")).unwrap(),
+    };
+    let (sender, address) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let app = muretto_host_agent::App::open(config).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            sender.send(listener.local_addr().unwrap()).unwrap();
+            axum::serve(listener, muretto_host_agent::router(app))
+                .await
+                .unwrap();
+        });
+    });
+    format!("http://{}", address.recv().unwrap())
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn a_host_is_added_given_a_preset_and_runs_it_after_its_content_goes_up(cx: &mut TestAppContext) {
+    let root = game_folder("host");
+    let base = root.parent().unwrap().to_path_buf();
+    let _ = std::fs::remove_file(base.join("settings.json"));
+    let _ = std::fs::remove_file(saved_hosts(&root));
+    // What the server reads from the fixture's cars and tracks.
+    for path in [
+        "content/cars/alpha_gt3/data.acd",
+        "content/cars/beta_gt3/data.acd",
+        "content/cars/gamma_road/data.acd",
+        "content/tracks/park/long/data/surfaces.ini",
+        "content/tracks/park/short/data/surfaces.ini",
+        "content/tracks/ring/data/surfaces.ini",
+    ] {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "server file").unwrap();
+    }
+    let token = "0123456789abcdef";
+    let url = host_agent(&base.join("agent"), token);
+    let (window, _, shell) = open(cx, &root);
+
+    // Hosting is off until the player turns it on.
+    const HOST: (&str, usize) = ("section", 3);
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(HOST).is_none());
+    })
+    .unwrap();
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| {
+        window.click(("Launcher", 0usize), cx)
+    });
+    act(cx, window, |window, cx| window.click("hosting", cx));
+    assert!(cx.update(|cx| shell.read(cx).is_hosting()));
+    let kept = std::fs::read_to_string(base.join("settings.json")).unwrap();
+    assert!(kept.contains("\"hosting\": true"), "{kept}");
+    act(cx, window, |window, cx| window.click(HOST, cx));
+
+    let host = cx.update(|cx| shell.read(cx).host().unwrap().clone());
+    cx.update(|cx| {
+        host.update(cx, |host, cx| {
+            assert!(!host.add("Club", &url, "", cx), "a token is needed");
+            assert!(host.add("Club", &url, token, cx));
+        })
+    });
+    let idle = |cx: &mut TestAppContext| cx.update(|cx| !host.read(cx).is_busy());
+    settle_until(cx, "the host to answer", |cx| {
+        idle(cx) && cx.update(|cx| host.read(cx).presets().is_some())
+    });
+    assert_eq!(cx.update(|cx| host.read(cx).presets().unwrap().len()), 0);
+    assert!(
+        std::fs::read_to_string(saved_hosts(&root))
+            .unwrap()
+            .contains(token)
+    );
+
+    // A new preset starts from the session: its track and car.
+    act(cx, window, |window, cx| window.click("preset-new", cx));
+    assert!(cx.update(|cx| host.read(cx).is_editing()));
+    act(cx, window, |window, cx| {
+        window.click(("preset-car-more", 0usize), cx)
+    });
+    act(cx, window, |window, cx| window.click("preset-save", cx));
+    settle_until(cx, "the preset to be saved", |cx| {
+        idle(cx)
+            && cx.update(|cx| {
+                !host.read(cx).is_editing() && host.read(cx).presets().is_some_and(|p| p.len() == 1)
+            })
+    });
+    let summary = cx.update(|cx| host.read(cx).presets().unwrap()[0].clone());
+    assert_eq!(summary.slots, 2);
+    assert_eq!(summary.updated_by, "alex");
+    assert!(!summary.active);
+
+    // The host has none of the content: it goes up, then the server runs.
+    act(cx, window, |window, cx| {
+        window.click(("preset-activate", 0usize), cx)
+    });
+    settle_until(cx, "the preset to run", |cx| {
+        idle(cx) && cx.update(|cx| host.read(cx).presets().is_some_and(|p| p[0].active))
+    });
+    let note = cx.update(|cx| host.read(cx).note().unwrap_or_default().to_owned());
+    assert!(note.contains("runs on Club now"), "{note}");
+    assert!(note.contains("files of content went up"), "{note}");
+    let status = cx.update(|cx| host.read(cx).status().unwrap().clone());
+    assert_eq!(status.active.unwrap().id, summary.id);
+
+    // Opened again, the preset changes and the change can be applied.
+    act(cx, window, |window, cx| {
+        window.click(("preset-open", 0usize), cx)
+    });
+    settle_until(cx, "the preset to open", |cx| {
+        idle(cx) && cx.update(|cx| host.read(cx).is_editing())
+    });
+    act(cx, window, |window, cx| {
+        window.click(("preset-car-less", 0usize), cx)
+    });
+    act(cx, window, |window, cx| window.click("preset-save", cx));
+    settle_until(cx, "the change to be saved", |cx| {
+        idle(cx)
+            && cx.update(|cx| {
+                !host.read(cx).is_editing()
+                    && host.read(cx).presets().is_some_and(|p| p[0].slots == 1)
+            })
+    });
+    assert!(cx.update(|cx| {
+        host.read(cx)
+            .status()
+            .unwrap()
+            .active
+            .as_ref()
+            .unwrap()
+            .changed_since
+    }));
+
+    // Deleting asks first.
+    act(cx, window, |window, cx| {
+        window.click(("preset-delete", 0usize), cx)
+    });
+    assert_eq!(cx.update(|cx| host.read(cx).presets().unwrap().len()), 1);
+    act(cx, window, |window, cx| {
+        window.click(("preset-delete", 0usize), cx)
+    });
+    settle_until(cx, "the preset to go", |cx| {
+        idle(cx) && cx.update(|cx| host.read(cx).presets().is_some_and(|p| p.is_empty()))
+    });
+
+    // Turned off, the section goes again.
+    act(cx, window, |window, cx| window.click(SETTINGS, cx));
+    act(cx, window, |window, cx| window.click("hosting", cx));
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(HOST).is_none());
     })
     .unwrap();
 }

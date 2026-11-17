@@ -38,6 +38,8 @@ The interface follows `docs/design/AC Launcher — UI Design.pdf`.
 | `crates/dbghelp-shim` | The Proton fix for Custom Shaders Patch: a `dbghelp.dll` that adds the `acs.pdb` symbols Wine's dbghelp leaves out. Built for Windows and checked in at `crates/core/assets/dbghelp.dll`; after changing it, run `cargo make shim` (needs the `x86_64-pc-windows-gnu` target and mingw-w64). |
 | `crates/group-protocol` | What Muretto and the group server say to each other, and how the server keeps its rooms. |
 | `crates/group-server` | The server friends' groups meet on (see [Groups](#groups)). Not part of the app build. |
+| `crates/host-protocol` | What Muretto and the host agent say to each other: server presets and the content a server needs. |
+| `crates/host-agent` | Runs AssettoServer for Muretto (see [Hosting](#hosting)). Not part of the app build. |
 | `crates/app` | The window. `theme.rs` holds colours and type, `ui/` the controls, `shell.rs` the frame, `screens/` one file per screen. |
 
 ## Running
@@ -130,6 +132,22 @@ To try an install against the real download without touching the game:
 ```sh
 cargo run -p muretto-core --example csp -- /tmp/fake-game
 ```
+
+## Hosting
+
+Players who run their own AssettoServer turn on **Settings › Launcher ›
+General › Server hosting**. It is off by default and kept in
+`settings.json` in Muretto's settings folder. With it on, a **Host** section
+appears: add a host with the agent's address and a token from its
+`AGENT_TOKENS`, then look through its presets, write new ones from the
+installed cars and tracks, change them and activate one. Hosts and their
+tokens are kept in `hosts.json` (readable only by the player on Linux).
+When a host lacks a preset's content, activating it uploads the few files
+the server reads (`data.acd`, colliders, the track's surfaces and models)
+from the game folder first.
+
+The editor covers the name, track, cars and slots, session lengths, time,
+weather and password; every other setting a preset holds is kept as it is.
 
 ## Releasing
 
