@@ -4398,7 +4398,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "muretto"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "dirs 6.0.0",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "muretto-core"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4437,14 +4437,14 @@ dependencies = [
 
 [[package]]
 name = "muretto-dbghelp-shim"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "pdb",
 ]
 
 [[package]]
 name = "muretto-group-protocol"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4452,7 +4452,7 @@ dependencies = [
 
 [[package]]
 name = "muretto-group-server"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -4465,7 +4465,7 @@ dependencies = [
 
 [[package]]
 name = "muretto-host-agent"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -4481,7 +4481,7 @@ dependencies = [
 
 [[package]]
 name = "muretto-host-protocol"
-version = "0.0.2"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
