@@ -34,6 +34,10 @@ pub struct KeptHost {
     pub token: String,
     /// Seconds since 1970 when it was added.
     pub added: u64,
+    /// Whether the track's models go up with a preset's content, so the
+    /// server can turn away drivers whose track differs. They run to
+    /// hundreds of megabytes, so it is off unless the player turns it on.
+    pub track_models: bool,
 }
 
 impl std::fmt::Debug for KeptHost {
@@ -42,6 +46,7 @@ impl std::fmt::Debug for KeptHost {
         f.debug_struct("KeptHost")
             .field("name", &self.name)
             .field("url", &self.url)
+            .field("track_models", &self.track_models)
             .finish_non_exhaustive()
     }
 }
@@ -85,6 +90,10 @@ impl Hosts {
                             token: text("token")?.to_owned(),
                             name: text("name").unwrap_or_default().to_owned(),
                             added: host.get("added").and_then(Value::as_u64).unwrap_or(0),
+                            track_models: host
+                                .get("track_models")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
                         })
                     })
                     .collect()
@@ -94,7 +103,7 @@ impl Hosts {
     }
 
     /// Keeps a host; one at the same address is replaced, so a new token
-    /// can be put in by adding the host again.
+    /// can be put in by adding the host again. Its settings stay.
     pub fn add(&mut self, name: &str, url: &str, token: &str) -> Result<&KeptHost> {
         let url = normalise_url(url)
             .ok_or_else(|| crate::Error::Network(format!("{url} is not the address of a host.")))?;
@@ -109,10 +118,14 @@ impl Hosts {
             added: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            track_models: false,
         };
         let at = match self.hosts.iter().position(|host| host.url == kept.url) {
             Some(at) => {
-                self.hosts[at] = kept;
+                self.hosts[at] = KeptHost {
+                    track_models: self.hosts[at].track_models,
+                    ..kept
+                };
                 at
             }
             None => {
@@ -122,6 +135,14 @@ impl Hosts {
         };
         self.save()?;
         Ok(&self.hosts[at])
+    }
+
+    /// Whether the host at `url` is sent the track's models.
+    pub fn set_track_models(&mut self, url: &str, on: bool) -> Result<()> {
+        if let Some(host) = self.hosts.iter_mut().find(|host| host.url == url) {
+            host.track_models = on;
+        }
+        self.save()
     }
 
     pub fn remove(&mut self, url: &str) -> Result<()> {
@@ -142,6 +163,7 @@ impl Hosts {
                 "url": host.url,
                 "token": host.token,
                 "added": host.added,
+                "track_models": host.track_models,
             })).collect::<Vec<_>>(),
         });
         let text = format!("{value:#}\n");
@@ -474,7 +496,11 @@ mod tests {
         hosts
             .add("Club", "http://10.0.0.5:3200", "token-two-xxxxxxxx")
             .unwrap();
-        // The same address again takes the new token.
+        assert!(!hosts.hosts[0].track_models, "off unless turned on");
+        hosts
+            .set_track_models("https://box.example:3200", true)
+            .unwrap();
+        // The same address again takes the new token and keeps the setting.
         hosts
             .add("Box", "https://box.example:3200/", " token-new-xxxxxxxx ")
             .unwrap();
@@ -484,6 +510,8 @@ mod tests {
         let names: Vec<_> = hosts.hosts.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, ["Box", "Club"]);
         assert_eq!(hosts.hosts[0].token, "token-new-xxxxxxxx");
+        assert!(hosts.hosts[0].track_models);
+        assert!(!hosts.hosts[1].track_models);
         assert!(!format!("{:?}", hosts.hosts[0]).contains("token-new"));
         #[cfg(unix)]
         {

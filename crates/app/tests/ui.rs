@@ -290,6 +290,18 @@ fn open_with_groups(
     servers: Paddock,
     groups: Memory,
 ) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
+    open_sized(cx, root, patches, servers, groups, px(900.))
+}
+
+/// Opens Muretto in a window `height` tall.
+fn open_sized(
+    cx: &mut TestAppContext,
+    root: &Path,
+    patches: Shelf,
+    servers: Paddock,
+    groups: Memory,
+    height: gpui_kit::Pixels,
+) -> (AnyWindowHandle, Entity<Game>, Entity<Shell>) {
     let install = Install::at(root.to_path_buf(), None);
     let library = Library::scan(&install);
     assert_eq!((library.cars.len(), library.tracks.len()), (3, 2));
@@ -299,7 +311,7 @@ fn open_with_groups(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Default::default(),
-                    size: size(px(1440.), px(900.)),
+                    size: size(px(1440.), height),
                 })),
                 ..Default::default()
             },
@@ -1300,7 +1312,16 @@ fn a_host_is_added_given_a_preset_and_runs_it_after_its_content_goes_up(cx: &mut
     }
     let token = "0123456789abcdef";
     let url = host_agent(&base.join("agent"), token);
-    let (window, _, shell) = open(cx, &root);
+    // Short enough that the preset editor runs past the window.
+    const HEIGHT: f32 = 770.;
+    let (window, _, shell) = open_sized(
+        cx,
+        &root,
+        Shelf { online: true },
+        Paddock::default(),
+        Memory::default(),
+        px(HEIGHT),
+    );
 
     // Hosting is off until the player turns it on.
     const HOST: (&str, usize) = ("section", 3);
@@ -1337,9 +1358,45 @@ fn a_host_is_added_given_a_preset_and_runs_it_after_its_content_goes_up(cx: &mut
             .contains(token)
     );
 
+    // The track's models stay home unless the host is set to check them.
+    let models = |cx: &mut TestAppContext| cx.update(|cx| host.read(cx).hosts()[0].track_models);
+    assert!(!models(cx));
+    act(cx, window, |window, cx| {
+        window.click("host-track-models", cx)
+    });
+    assert!(models(cx));
+    act(cx, window, |window, cx| {
+        window.click("host-track-models", cx)
+    });
+    assert!(!models(cx));
+    let kept = std::fs::read_to_string(saved_hosts(&root)).unwrap();
+    assert!(kept.contains("\"track_models\": false"), "{kept}");
+
     // A new preset starts from the session: its track and car.
     act(cx, window, |window, cx| window.click("preset-new", cx));
     assert!(cx.update(|cx| host.read(cx).is_editing()));
+
+    // The editor runs past the window; the page scrolls to its end rather
+    // than squeezing it.
+    let password = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("preset-password").bounds()
+        })
+        .unwrap()
+    };
+    let before = password(cx);
+    assert!(before.bottom() > px(HEIGHT), "{before:?}");
+    act(cx, window, |window, cx| {
+        window.scroll(
+            "host-refresh",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-3000.))),
+            cx,
+        )
+    });
+    let after = password(cx);
+    assert!(after.bottom() <= px(HEIGHT), "{after:?}");
+    assert!(after.top() < before.top());
     act(cx, window, |window, cx| {
         window.click(("preset-car-more", 0usize), cx)
     });

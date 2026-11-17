@@ -124,25 +124,35 @@ fn the_files_of_the_preset_s_layout_are_picked_and_what_is_lacking_named() {
         park("long"),
         vec![entry("alpha_gt3"), entry("loose"), entry("alpha_gt3")],
     );
-    let (missing, files) = local_files(&install, &preset);
-    assert_eq!(missing, ["loose"]);
-    let mut paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
-    paths.sort_unstable();
-    assert_eq!(
-        paths,
-        [
-            "content/cars/alpha_gt3/collider.kn5",
-            "content/cars/alpha_gt3/data.acd",
-            "content/tracks/park/long/ai/fast_lane.ai",
-            "content/tracks/park/long/data/surfaces.ini",
-            "content/tracks/park/models_long.ini",
-            "content/tracks/park/park.kn5",
-            "system/data/surfaces.ini",
-        ]
-    );
+    let paths = |track_models| {
+        let (missing, files) = local_files(&install, &preset, track_models);
+        assert_eq!(missing, ["loose"]);
+        let mut paths: Vec<String> = files
+            .iter()
+            .map(|(path, _)| path.as_str().to_owned())
+            .collect();
+        paths.sort_unstable();
+        paths
+    };
+    let small = [
+        "content/cars/alpha_gt3/collider.kn5",
+        "content/cars/alpha_gt3/data.acd",
+        "content/tracks/park/long/ai/fast_lane.ai",
+        "content/tracks/park/long/data/surfaces.ini",
+        "content/tracks/park/models_long.ini",
+        "system/data/surfaces.ini",
+    ];
+    // The track's models only when the host asks for them.
+    assert_eq!(paths(false), small);
+    let mut all = small.to_vec();
+    all.insert(5, "content/tracks/park/park.kn5");
+    assert_eq!(paths(true), all);
 
     let elsewhere = Preset::new("Elsewhere", park("reverse"), vec![entry("alpha_gt3")]);
-    assert_eq!(local_files(&install, &elsewhere).0, ["park (reverse)"]);
+    assert_eq!(
+        local_files(&install, &elsewhere, false).0,
+        ["park (reverse)"]
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -179,11 +189,18 @@ fn a_preset_is_created_given_its_content_activated_and_kept_from_lost_updates() 
     assert_eq!(fields, ["track", "entries[0].model"]);
 
     let progress = Progress::new();
-    let synced = sync(&client, &install, &preset, &progress).unwrap();
-    assert_eq!(synced.uploaded, 7);
+    let synced = sync(&client, &install, &preset, false, &progress).unwrap();
+    assert_eq!(synced.uploaded, 6);
     assert!(synced.missing.is_empty());
     assert_eq!(
-        sync(&client, &install, &preset, &progress)
+        sync(&client, &install, &preset, true, &progress)
+            .unwrap()
+            .uploaded,
+        1,
+        "only the track's model is new"
+    );
+    assert_eq!(
+        sync(&client, &install, &preset, true, &progress)
             .unwrap()
             .uploaded,
         0,

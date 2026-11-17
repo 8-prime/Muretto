@@ -38,7 +38,10 @@ use crate::{
     game::Game,
     job::Job,
     theme::{GAP, PAGE, RADIUS, color, font},
-    ui::{ChoiceField, NumberField, badge, button, display, label, mono, muted, panel, stat_strip},
+    ui::{
+        ChoiceField, NumberField, badge, button, display, label, mono, muted, panel, stat_strip,
+        switch,
+    },
 };
 
 /// What a host said when last asked.
@@ -244,6 +247,16 @@ impl HostScreen {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
             }
         }
+    }
+
+    /// Whether presets put on the host at `url` take the track's models.
+    pub fn set_track_models(&mut self, url: &str, on: bool, cx: &mut Context<Self>) {
+        self.note = self
+            .hosts
+            .set_track_models(url, on)
+            .err()
+            .map(|error| (format!("Could not keep the setting: {error}").into(), true));
+        cx.notify();
     }
 
     fn remove_host(&mut self, url: &str, cx: &mut Context<Self>) {
@@ -542,7 +555,13 @@ impl HostScreen {
             move |install, progress| {
                 let run = || -> HostResult<(Synced, HostResult<Status>)> {
                     let stored = client.preset(id)?;
-                    let synced = sync(&client, install, &stored.preset, progress)?;
+                    let synced = sync(
+                        &client,
+                        install,
+                        &stored.preset,
+                        host.track_models,
+                        progress,
+                    )?;
                     Ok((synced, client.activate(id, force)))
                 };
                 Ok(run())
@@ -1150,16 +1169,10 @@ impl HostScreen {
                 })),
             );
 
-        let mut page = div()
-            .id("host-page")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .gap(GAP)
-            .p(PAGE)
-            .overflow_y_scroll()
-            .child(header);
+        // The column grows with what it holds and the page around it
+        // scrolls; as a flex child of the scrolling page it would be squeezed
+        // to the window's height instead, cutting off the editor.
+        let mut page = div().flex().flex_col().gap(GAP).p(PAGE).child(header);
 
         if let Some((text, problem)) = &self.note {
             page = page.child(strip(text.clone(), *problem));
@@ -1242,12 +1255,45 @@ impl HostScreen {
             _ => page = page.child(muted("Asking the host…")),
         }
 
-        match &self.editor {
+        page = page.child(self.track_models_switch(host, cx));
+        page = match &self.editor {
             Some(editor) if editor.url == host.url => {
                 page.child(self.editor_panel(editor, &library, cx))
             }
             _ => page.child(self.presets_panel(view, &library, cx)),
-        }
+        };
+        div()
+            .id("host-page")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .child(page)
+    }
+
+    fn track_models_switch(&self, host: &KeptHost, cx: &mut Context<Self>) -> impl IntoElement {
+        let url = host.url.clone();
+        let screen = cx.entity();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .p(px(14.))
+            .rounded(RADIUS)
+            .border_1()
+            .border_color(rgb(color::BORDER))
+            .bg(rgb(color::SURFACE))
+            .child(
+                switch("host-track-models", host.track_models)
+                    .caption("Check drivers' track models")
+                    .on_toggle(move |on, _, cx| {
+                        screen.update(cx, |screen, cx| screen.set_track_models(&url, on, cx))
+                    }),
+            )
+            .child(muted(
+                "Uploads the track's models with a preset, so the server turns away drivers whose track differs. \
+                 They can run to hundreds of megabytes; off, only the few small files the server needs go up.",
+            ))
     }
 
     fn presets_panel(

@@ -36,10 +36,13 @@ pub struct Synced {
 
 /// The files of `preset`'s cars and track, and the game's own surfaces,
 /// found in `install`, with what the install lacks of them by folder name.
-/// Track files of other layouts are left out.
+/// Track files of other layouts are left out, and so are the track's models
+/// unless `track_models`: the server only checks drivers' copies against
+/// them, and they run to hundreds of megabytes.
 pub fn local_files(
     install: &Install,
     preset: &Preset,
+    track_models: bool,
 ) -> (Vec<String>, Vec<(ContentPath, PathBuf)>) {
     type Found = Vec<(FileKind, ContentPath, PathBuf)>;
     fn add(found: &mut Found, relative: String, file: PathBuf) {
@@ -84,10 +87,11 @@ pub fn local_files(
         },
     );
     // Only the preset's layout: the server reads no other.
-    files.retain(|(kind, ..)| match kind {
+    files.retain(|(kind, path, _)| match kind {
         FileKind::TrackSurfaces { layout, .. }
         | FileKind::TrackModels { layout, .. }
         | FileKind::AiSpline { layout, .. } => layout == &track.layout,
+        FileKind::TrackRoot { .. } => track_models || !is_model(path),
         _ => true,
     });
     let layout_found = files.iter().any(|(kind, ..)| {
@@ -109,6 +113,11 @@ pub fn local_files(
         .map(|(_, path, file)| (path, file))
         .collect();
     (missing, files)
+}
+
+/// Whether `path` is a `.kn5` model.
+fn is_model(path: &ContentPath) -> bool {
+    path.as_str().to_ascii_lowercase().ends_with(".kn5")
 }
 
 /// Files directly in `dir`, by name.
@@ -185,14 +194,15 @@ impl<R: Read> Read for Counted<'_, R> {
 }
 
 /// Uploads whatever of `preset`'s content the host lacks or holds another
-/// copy of.
+/// copy of; the track's models only with `track_models`.
 pub fn sync(
     client: &Client,
     install: &Install,
     preset: &Preset,
+    track_models: bool,
     progress: &Progress,
 ) -> HostResult<Synced> {
-    let (missing, paths) = local_files(install, preset);
+    let (missing, paths) = local_files(install, preset, track_models);
     let mut files = Vec::with_capacity(paths.len());
     progress.begin(Stage::Starting, None);
     for (path, file) in paths {
