@@ -19,6 +19,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+# The Host screen is tested against the real agent.
+muretto-host-agent = { path = "../host-agent" }
+axum = "0.8.9"
+tokio = { version = "1.54", features = ["rt-multi-thread", "net"] }
 
 [[bin]]
 name = "muretto"

@@ -24,7 +24,14 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1"
 ring = "0.17"
 base64 = "0.22"
+# Server hosts: the agent's API.
+muretto-host-protocol = { path = "../host-protocol" }
+serde = "1"
 
 [dev-dependencies]
+# The host client is tested against the real agent.
+muretto-host-agent = { path = "../host-agent" }
+axum = "0.8.9"
+tokio = { version = "1.54", features = ["rt-multi-thread", "net"] }
 # Tests write 7z archives to unpack.
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["compress", "util"] }

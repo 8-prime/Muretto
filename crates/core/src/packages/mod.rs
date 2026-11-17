@@ -37,6 +37,8 @@ pub enum Stage {
     Downloading,
     Unpacking,
     Installing,
+    /// Sending files to a server host.
+    Uploading,
 }
 
 /// A running installation, shared between the thread doing the work and the
@@ -59,6 +61,7 @@ impl Progress {
             1 => Stage::Downloading,
             2 => Stage::Unpacking,
             3 => Stage::Installing,
+            4 => Stage::Uploading,
             _ => Stage::Starting,
         }
     }
@@ -84,13 +87,13 @@ impl Progress {
         self.cancelled.store(true, Relaxed);
     }
 
-    fn begin(&self, stage: Stage, total: Option<u64>) {
+    pub(crate) fn begin(&self, stage: Stage, total: Option<u64>) {
         self.done.store(0, Relaxed);
         self.total.store(total.unwrap_or(0), Relaxed);
         self.stage.store(stage as u8, Relaxed);
     }
 
-    fn advance(&self, bytes: usize) -> Result<()> {
+    pub(crate) fn advance(&self, bytes: usize) -> Result<()> {
         self.done.fetch_add(bytes as u64, Relaxed);
         if self.cancelled.load(Relaxed) {
             return Err(Error::Cancelled);
